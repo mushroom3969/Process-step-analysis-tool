@@ -24,6 +24,7 @@ from tabs import tab_correlation
 from tabs import tab_pca
 from tabs import tab_feature_importance
 from tabs import tab_literature
+from tabs import tab_stat_test
 
 
 # ── Page config ───────────────────────────────────────────────────────────────
@@ -127,6 +128,7 @@ tabs = st.tabs([
     "🔗 相關性分析",
     "🧩 PCA 分析",
     "🌲 特徵重要性",
+    "📐 統計檢定",
     "📚 文獻佐證分析",
 ])
 
@@ -152,4 +154,7 @@ with tabs[6]:
     tab_feature_importance.render(selected_process_df)
 
 with tabs[7]:
+    tab_stat_test.render(selected_process_df)
+
+with tabs[8]:
     tab_literature.render()
