@@ -25,6 +25,7 @@ from tabs import tab_pca
 from tabs import tab_feature_importance
 from tabs import tab_literature
 from tabs import tab_stat_test
+from tabs import tab_cross_process
 
 
 # ── Page config ───────────────────────────────────────────────────────────────
@@ -121,6 +122,7 @@ selected_process    = st.session_state.get("selected_process", "")
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
 tabs = st.tabs([
+    "🔭 跨製程監控",
     "📊 資料總覽",
     "📈 趨勢圖",
     "🔧 特徵工程",
@@ -133,28 +135,31 @@ tabs = st.tabs([
 ])
 
 with tabs[0]:
-    tab_overview.render(raw_df, dfs_dict, selected_process_df, selected_process)
+    tab_cross_process.render(raw_df)
 
 with tabs[1]:
-    tab_trend.render(selected_process_df)
+    tab_overview.render(raw_df, dfs_dict, selected_process_df, selected_process)
 
 with tabs[2]:
-    tab_feature_eng.render(selected_process_df)
+    tab_trend.render(selected_process_df)
 
 with tabs[3]:
-    tab_missing.render(selected_process_df)
+    tab_feature_eng.render(selected_process_df)
 
 with tabs[4]:
-    tab_correlation.render(selected_process_df)
+    tab_missing.render(selected_process_df)
 
 with tabs[5]:
-    tab_pca.render(selected_process_df)
+    tab_correlation.render(selected_process_df)
 
 with tabs[6]:
-    tab_feature_importance.render(selected_process_df)
+    tab_pca.render(selected_process_df)
 
 with tabs[7]:
-    tab_stat_test.render(selected_process_df)
+    tab_feature_importance.render(selected_process_df)
 
 with tabs[8]:
+    tab_stat_test.render(selected_process_df)
+
+with tabs[9]:
     tab_literature.render()
