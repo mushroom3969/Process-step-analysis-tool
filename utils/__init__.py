@@ -20,7 +20,7 @@ from .models import (
 from .plotting import (
     plot_indexed_lineplots,
     plot_clean_lineplots,
-    plot_contribution_bar,
+    plot_correlation_bar,
     plot_missing_heatmap,
     plot_yield_tracking,
 )
