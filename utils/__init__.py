@@ -20,8 +20,9 @@ from .models import (
 from .plotting import (
     plot_indexed_lineplots,
     plot_clean_lineplots,
-    plot_ht2_bar,
     plot_contribution_bar,
+    plot_missing_heatmap,
+    plot_yield_tracking,
 )
 from .pubmed_gemini import (
     pubmed_search,
