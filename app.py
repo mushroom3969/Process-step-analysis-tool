@@ -17,11 +17,16 @@ import streamlit as st
 from utils import split_process_df
 
 # ── Tab imports ─────────────────────────────────────────────────────────────
-from tabs import (
-    tab_overview, tab_cross_process, tab_feature_eng, 
-    tab_feature_importance, tab_missing, tab_correlation, 
-    tab_pca, tab_stat_test, tab_trend, tab_literature
-)
+from tabs import tab_overview          # render(raw_df, dfs_dict, selected_process_df, selected_process)
+from tabs import tab_cross_process     # render(raw_df)
+from tabs import tab_feature_eng       # render(selected_process_df)
+from tabs import tab_feature_importance# render(selected_process_df)
+from tabs import tab_missing           # render(selected_process_df)
+from tabs import tab_correlation       # render(selected_process_df)
+from tabs import tab_pca               # render(selected_process_df)
+from tabs import tab_stat_test         # render(selected_process_df)
+from tabs import tab_trend             # render(selected_process_df)
+from tabs import tab_literature        # render()
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -62,20 +67,30 @@ st.markdown("""
 # ══════════════════════════════════════════════════════════════════════════════
 # ── 多製程步驟合併工具 ────────────────────────────────────────────────────────
 # ══════════════════════════════════════════════════════════════════════════════
-def _merge_process_steps(raw_df: pd.DataFrame, dfs_dict: dict, selected_steps: list) -> pd.DataFrame or None:
+def _merge_process_steps(raw_df: pd.DataFrame, dfs_dict: dict, selected_steps: list) -> pd.DataFrame | None:
+    """
+    合併多個製程步驟：
+    • 單步驟 → 直接回傳 dfs_dict[step]（欄位已去掉前綴）
+    • 多步驟 → 從 raw_df 取出 'Step:Param' 欄位，保留完整前綴，以 BatchID outer join
+    """
     if not selected_steps:
         return None
         
     batch_col = "BatchID"
+
+    # ── 單步驟：原始行為 ──────────────────────────────────────
     if len(selected_steps) == 1:
         return dfs_dict[selected_steps[0]].copy()
 
+    # ── 多步驟合併 ────────────────────────────────────────────
     has_batch = batch_col in raw_df.columns
     base = raw_df[[batch_col]].copy() if has_batch else pd.DataFrame(index=raw_df.index)
     
     for step in selected_steps:
+        # 取出該 step 的所有欄位（完整 'Step:Param' 格式）
         step_cols = [c for c in raw_df.columns if c.startswith(f"{step}:")]
-        if not step_cols: continue
+        if not step_cols:
+            continue
             
         sub = raw_df[[batch_col] + step_cols].copy() if has_batch else raw_df[step_cols].copy()
         
@@ -86,17 +101,25 @@ def _merge_process_steps(raw_df: pd.DataFrame, dfs_dict: dict, selected_steps: l
         else:
             base = pd.concat([base.reset_index(drop=True), sub.reset_index(drop=True)], axis=1)
 
+    # 數值欄轉型
     non_id = [c for c in base.columns if c != batch_col]
     base[non_id] = base[non_id].apply(pd.to_numeric, errors="coerce")
     base = base.dropna(axis=1, how="all")
     return base
 
 # ── Session state init ────────────────────────────────────────────────────────
-if "raw_df" not in st.session_state:
-    st.session_state["raw_df"] = None
-    st.session_state["dfs_dict"] = None
-    st.session_state["selected_steps"] = []
-    st.session_state["clean_df"] = None
+_SESSION_DEFAULTS = {
+    "raw_df": None, 
+    "dfs_dict": None,
+    "selected_process_df": None, 
+    "clean_df": None,
+    "selected_steps": [],
+    "X": None, "y": None, "label": None, "x_scaled": None,
+}
+
+for k, v in _SESSION_DEFAULTS.items():
+    if k not in st.session_state:
+        st.session_state[k] = v
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
@@ -104,7 +127,9 @@ with st.sidebar:
     st.title(" Bioprocess Analytics")
     st.markdown("---")
     
+    st.markdown("### 資料載入")
     uploaded_file = st.file_uploader("上傳 CSV 資料檔", type=["csv"])
+    
     if uploaded_file:
         try:
             raw_df = pd.read_csv(uploaded_file)
@@ -117,72 +142,134 @@ with st.sidebar:
             
             st.session_state["raw_df"] = raw_df
             st.session_state["dfs_dict"] = split_process_df(raw_df)
-            st.success("載入成功！")
+            st.session_state["selected_steps"] = []
+            st.session_state["selected_process_df"] = None
+            st.session_state["clean_df"] = None
+            st.success(f"載入成功！{raw_df.shape[0]} 筆 × {raw_df.shape[1]} 欄")
         except Exception as e:
             st.error(f"載入失敗：{e}")
 
-    # 製程選擇邏輯
+    # ── 製程步驟選擇 ──────────────────────────────────────────
+    st.markdown("---")
     if st.session_state["dfs_dict"]:
+        st.markdown("### 製程步驟選擇")
         process_list = list(st.session_state["dfs_dict"].keys())
-        select_mode = st.radio("選擇模式", [" 單一步驟", " 多步驟合併"], horizontal=True)
+        
+        select_mode = st.radio(
+            "選擇模式",
+            [" 單一步驟", " 多步驟合併"],
+            horizontal=True,
+            key="sidebar_mode",
+        )
+        
+        prev_steps = st.session_state.get("selected_steps", [])
         
         if select_mode == " 單一步驟":
-            sel = st.selectbox("選擇製程步驟", process_list)
+            # 若之前是多選，取第一個作為預設
+            default_single = prev_steps[0] if prev_steps and prev_steps[0] in process_list else process_list[0]
+            sel = st.selectbox("選擇製程步驟", process_list, index=process_list.index(default_single), key="sidebar_single")
             selected_steps = [sel]
+            selected_process = sel
         else:
-            selected_steps = st.multiselect("選擇步驟", process_list, default=process_list[:1])
+            default_multi = prev_steps if prev_steps else process_list[:min(2, len(process_list))]
+            selected_steps = st.multiselect(
+                "選擇製程步驟（可多選）",
+                process_list,
+                default=[s for s in default_multi if s in process_list],
+                key="sidebar_multi",
+            )
+            if not selected_steps:
+                st.warning("請至少選擇一個步驟。")
+                selected_steps = [process_list[0]]
+            selected_process = " + ".join(selected_steps)
+
+        # 偵測步驟變更 → 清除 clean_df 避免舊特徵殘留
+        if set(selected_steps) != set(prev_steps):
+            st.session_state["clean_df"] = None
         
-        # 步驟變更時，重置清理狀態
-        if selected_steps != st.session_state["selected_steps"]:
-            st.session_state["selected_steps"] = selected_steps
-            st.session_state["clean_df"] = None # 重要：步驟切換，清理結果要歸零
-            
-        merged_df = _merge_process_steps(st.session_state["raw_df"], st.session_state["dfs_dict"], selected_steps)
-        st.session_state["selected_process_df"] = merged_df
+        # 更新 session state
+        st.session_state["selected_steps"] = selected_steps
+        st.session_state["selected_process"] = selected_process
+        
+        merged = _merge_process_steps(
+            st.session_state["raw_df"],
+            st.session_state["dfs_dict"],
+            selected_steps,
+        )
+        st.session_state["selected_process_df"] = merged
 
-# ── Main UI ──────────────────────────────────────────────────────────────────
+        # 摘要資訊
+        if merged is not None:
+            n_param = merged.shape[1] - (1 if "BatchID" in merged.columns else 0)
+            mode_icon = "📑" if len(selected_steps) > 1 else "🔬"
+            st.caption(f"{mode_icon} {merged.shape[0]} 批次 × {n_param} 參數")
+            if len(selected_steps) > 1:
+                st.info("多步驟模式：欄位保留 `步驟:參數` 完整名稱", icon="ℹ️")
+
+    st.markdown("---")
+    st.caption("Bioprocess Analytics v2.0")
+
+# ── Guard ─────────────────────────────────────────────────────────────────────
 st.title(" Bioprocess Data Analysis Platform")
-
 if st.session_state["raw_df"] is None:
-    st.info("請先在上傳資料以開始分析。")
+    st.markdown("""
+    <div class="info-box">
+        請先在左側上傳 <b>CSV 資料檔</b>（raw_data.csv）開始分析。
+    </div>
+    """, unsafe_allow_html=True)
     st.stop()
 
-# 決定後續 Tab 使用哪份資料：優先使用特徵工程後的 clean_df，若無則用 merged_df
-df_to_analyze = st.session_state.get("clean_df")
-if df_to_analyze is None:
-    df_to_analyze = st.session_state.get("selected_process_df")
+raw_df = st.session_state["raw_df"]
+dfs_dict = st.session_state["dfs_dict"]
+selected_process_df = st.session_state.get("selected_process_df")
+selected_process = st.session_state.get("selected_process", "")
+selected_steps = st.session_state.get("selected_steps", [])
 
-# 顯示目前狀態
-if st.session_state["selected_steps"]:
-    badges = "".join(f'<span class="step-badge">{s}</span>' for s in st.session_state["selected_steps"])
-    data_status = " (已執行特徵工程)" if st.session_state.get("clean_df") is not None else " (原始數據)"
-    st.markdown(f"**分析範圍：** {badges} {data_status}", unsafe_allow_html=True)
+# 標題列顯示當前步驟 badges
+if selected_steps:
+    badges = "".join(f'<span class="step-badge">{s}</span>' for s in selected_steps)
+    st.markdown(f"**當前分析步驟：** {badges}", unsafe_allow_html=True)
 
+# ── Tabs ──────────────────────────────────────────────────────────────────────
 tabs = st.tabs([
-    " 跨製程監控", " 資料總覽", " 趨勢圖", " 特徵工程", 
-    " 缺失值分析", " 相關性分析", " PCA 分析", 
-    " 特徵重要性", " 統計檢定", " 文獻佐證"
+    " 跨製程監控",
+    " 資料總覽",
+    " 趨勢圖",
+    " 特徵工程",
+    " 缺失值分析",
+    " 相關性分析",
+    " PCA 分析",
+    " 特徵重要性",
+    " 統計檢定",
+    " 文獻佐證分析",
 ])
 
-# 根據你的 tab_xxx.render 函式參數傳入對應資料
 with tabs[0]:
-    tab_cross_process.render(st.session_state["raw_df"])
+    tab_cross_process.render(raw_df)
+
 with tabs[1]:
-    tab_overview.render(st.session_state["raw_df"], st.session_state["dfs_dict"], df_to_analyze, " + ".join(st.session_state["selected_steps"]))
+    tab_overview.render(raw_df, dfs_dict, selected_process_df, selected_process)
+
 with tabs[2]:
-    tab_trend.render(df_to_analyze)
+    tab_trend.render(selected_process_df)
+
 with tabs[3]:
-    # 特徵工程必須傳入原始合併後的資料，讓它進行清理
-    tab_feature_eng.render(st.session_state["selected_process_df"])
+    tab_feature_eng.render(selected_process_df)
+
 with tabs[4]:
-    tab_missing.render(df_to_analyze)
+    tab_missing.render(selected_process_df)
+
 with tabs[5]:
-    tab_correlation.render(df_to_analyze)
+    tab_correlation.render(selected_process_df)
+
 with tabs[6]:
-    tab_pca.render(df_to_analyze)
+    tab_pca.render(selected_process_df)
+
 with tabs[7]:
-    tab_feature_importance.render(df_to_analyze)
+    tab_feature_importance.render(selected_process_df)
+
 with tabs[8]:
-    tab_stat_test.render(df_to_analyze)
+    tab_stat_test.render(selected_process_df)
+
 with tabs[9]:
     tab_literature.render()
