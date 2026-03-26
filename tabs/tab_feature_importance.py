@@ -244,14 +244,49 @@ def _render_shap_tab(fi_subtab, X_fi, y_fi, top_n_fi):
             st.caption(f"樣本{idx}｜預測:{rf.predict(X_fi.iloc[[idx]])[0]:.3f}｜實際:{y_fi.iloc[idx]:.3f}｜基準:{base_val:.3f}")
 
         with shap_subtabs[3]:
-            dep_feat = st.selectbox("主特徵", X_fi.columns.tolist(), key="shap_dep_feat")
-            dep_int  = st.selectbox("交互著色", ["auto"]+X_fi.columns.tolist(), key="shap_dep_int")
-            fig, ax  = plt.subplots(figsize=(9, 5))
-            shap_lib.dependence_plot(short_map[dep_feat], shap_arr, X_short,
-                                     interaction_index=(None if dep_int=="auto" else short_map[dep_int]),
-                                     ax=ax, show=False)
-            ax.set_xlabel(dep_feat, fontsize=9); plt.tight_layout()
-            st.pyplot(fig); plt.close()
+            st.markdown("#### 特徵交互作用分析 (Dependence Plot)")
+            st.caption("觀察主特徵數值變化時，SHAP 值如何隨交互特徵（顏色）改變。")
+            
+            c1, c2 = st.columns(2)
+            dep_feat = c1.selectbox("主特徵 (X軸)", X_fi.columns.tolist(), key="shap_dep_feat")
+            
+            # 增加一個選項讓使用者決定要不要自動尋找最強交互項
+            auto_interaction = c2.checkbox("自動尋找最強交互特徵", value=True)
+            
+            if auto_interaction:
+                dep_int = "auto"
+            else:
+                dep_int = c2.selectbox("交互著色特徵 (Color)", X_fi.columns.tolist(), key="shap_dep_int")
+        
+            fig, ax = plt.subplots(figsize=(10, 6))
+            
+            # 使用 shap_lib 繪製
+            shap_lib.dependence_plot(
+                dep_feat, 
+                shap_arr, 
+                X_fi, # 這裡建議傳入原始 X_fi 保持 Label 可讀性
+                interaction_index=dep_int,
+                ax=ax, 
+                show=False
+            )
+            
+            # 美化標籤
+            ax.set_title(f"Interaction: {dep_feat} vs {dep_int if dep_int != 'auto' else 'Most Correlated'}", fontsize=12)
+            plt.tight_layout()
+            st.pyplot(fig)
+            plt.close()
+
+def _render_interaction_heatmap(X_fi, top_n_fi):
+    st.markdown("#### Top 特徵相關性矩陣")
+    st.caption("高相關性的特徵對通常隱含較強的交互作用。")
+    
+    top_feats = st.session_state["fi_perm_df"]["Feature"].head(top_n_fi).tolist()
+    corr = X_fi[top_feats].corr()
+    
+    fig, ax = plt.subplots(figsize=(10, 8))
+    sns.heatmap(corr, annot=True, fmt=".2f", cmap="RdBu_r", center=0, ax=ax)
+    st.pyplot(fig)
+    plt.close()
 
 
 # ═══════════════════════════════════════════════════════════
@@ -455,8 +490,12 @@ def render(selected_process_df):
     X_fi = st.session_state["fi_X"]
     y_fi = st.session_state["fi_y"]
 
-    fi_subtabs = st.tabs(["🌲 RF 重要性", "🔪 Lasso 重要性", "🔮 SHAP 分析", "📐 PLS-VIP"])
+    fi_subtabs = st.tabs(["🌲 RF 重要性", "🔪 Lasso 重要性", "🔮 SHAP 分析", "📐 PLS-VIP", "🔄 交互作用探索"])
     _render_rf_tab(fi_subtabs[0], X_fi, y_fi, top_n_fi)
     _render_lasso_tab(fi_subtabs[1], X_fi, y_fi, top_n_fi)
     _render_shap_tab(fi_subtabs[2], X_fi, y_fi, top_n_fi)
     _render_pls_tab(fi_subtabs[3], X_fi, y_fi, top_n_fi)
+
+    with fi_subtabs[4]:
+        if st.session_state.get("fi_X") is not None:
+            _render_interaction_heatmap(st.session_state["fi_X"], top_n_fi)
