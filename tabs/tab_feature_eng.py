@@ -26,13 +26,16 @@ from utils import (
 
 def _mini_trend(df: pd.DataFrame, col: str, color: str = "#2e86ab",
                 title_prefix: str = "", height: float = 2.8) -> plt.Figure:
+    if col not in df.columns:
+        return None
+    
     plot_df = df.copy()
     if "BatchID" in plot_df.columns:
         plot_df["_sort"] = plot_df["BatchID"].apply(extract_number)
         plot_df = plot_df.sort_values("_sort").reset_index(drop=True)
     plot_df["_seq"] = range(1, len(plot_df) + 1)
 
-    vals = plot_df[col].values.astype(float)
+    vals = pd.to_numeric(plot_df[col], errors='coerce').values
     seq  = plot_df["_seq"].values
 
     fig, ax = plt.subplots(figsize=(10, height))
@@ -49,14 +52,13 @@ def _mini_trend(df: pd.DataFrame, col: str, color: str = "#2e86ab",
         ax.set_xticks(seq)
         ax.set_xticklabels([str(b)[-6:] for b in plot_df["BatchID"]], rotation=90, fontsize=6)
     
-    title = f"{title_prefix}{col[:60]}"
-    ax.set_title("\n".join(textwrap.wrap(title, width=72)), fontsize=8.5, pad=5)
+    ax.set_title(f"{title_prefix}{col[:60]}", fontsize=8.5)
     ax.legend(fontsize=7, loc="upper right")
     plt.tight_layout()
     return fig
 
 # ══════════════════════════════════════════════════════════════════════════════
-# ── Session-state 工具 ────────────────────────────────────────────────────────
+# ── Session-state 初始化 ──────────────────────────────────────────────────────
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _init_fe_state():
@@ -64,8 +66,6 @@ def _init_fe_state():
         st.session_state["fe_op_log"] = []
     if "clean_df" not in st.session_state:
         st.session_state["clean_df"] = None
-    if "fe_base_df" not in st.session_state:
-        st.session_state["fe_base_df"] = None
 
 def _push_op(op_type: str, cols_removed: list[str], cols_added: list[str],
              snapshot_before: pd.DataFrame, reason_map: dict = None):
@@ -77,46 +77,29 @@ def _push_op(op_type: str, cols_removed: list[str], cols_added: list[str],
         "snapshot":      snapshot_before.copy(),
     })
 
-def _undo_col(col: str):
-    log = st.session_state["fe_op_log"]
-    cdf = st.session_state["clean_df"]
-    for entry in reversed(log):
-        if col in entry["cols_removed"]:
-            snap = entry["snapshot"]
-            if col in snap.columns:
-                cdf = cdf.copy()
-                cdf[col] = snap[col].values
-                st.session_state["clean_df"] = cdf
-                st.toast(f"✅ 已還原：{col}")
-            return
-        if col in entry["cols_added"]:
-            if col in cdf.columns:
-                st.session_state["clean_df"] = cdf.drop(columns=[col])
-                st.toast(f"✅ 已移除：{col}")
-            return
-
 # ══════════════════════════════════════════════════════════════════════════════
-# ── 主界面渲染 ────────────────────────────────────────────────────────────────
+# ── Render 邏輯 ───────────────────────────────────────────────────────────────
 # ══════════════════════════════════════════════════════════════════════════════
 
 def render(selected_process_df):
     _init_fe_state()
     st.header("特徵工程 & 清理")
     
-    if selected_process_df is None:
-        st.info("請先在側欄選擇製程步驟。")
+    # 防呆檢查
+    if selected_process_df is None or (isinstance(selected_process_df, pd.DataFrame) and selected_process_df.empty):
+        st.warning("⚠️ 尚未偵測到製程數據，請確認資料來源。")
         return
 
     main_col, hist_col = st.columns([3, 1])
 
     with hist_col:
         st.markdown("### 📜 操作歷史")
-        log = st.session_state["fe_op_log"]
+        log = st.session_state.get("fe_op_log", [])
         if not log:
             st.caption("尚無紀錄")
         for i, entry in enumerate(reversed(log)):
             idx = len(log) - 1 - i
-            with st.expander(f"#{idx+1} {entry['op_type']}"):
+            with st.expander(f"**#{idx+1}** {entry['op_type']}"):
                 if st.button("↩️ 整批還原", key=f"undo_batch_{idx}"):
                     st.session_state["clean_df"] = entry["snapshot"].copy()
                     st.session_state["fe_op_log"] = st.session_state["fe_op_log"][:idx]
@@ -128,80 +111,75 @@ def render(selected_process_df):
             st.rerun()
 
     with main_col:
-        _render_main_logic(selected_process_df)
-
-def _render_main_logic(selected_process_df):
-    # ── Step 1：自動特徵工程 ──
-    st.markdown("### 🔧 Step 1：自動特徵工程")
-    if st.button("🔧 執行特徵工程", key="run_fe", type="primary"):
-        snapshot_before = selected_process_df.copy()
-        with st.spinner("處理中..."):
-            clean_df, _ = clean_process_features_with_log(selected_process_df, id_col="BatchID")
-        
-        st.session_state["fe_base_df"] = snapshot_before
-        st.session_state["clean_df"] = clean_df
-        
-        removed = sorted(set(snapshot_before.columns) - set(clean_df.columns))
-        added = sorted(set(clean_df.columns) - set(snapshot_before.columns))
-        _push_op("auto_clean", removed, added, snapshot_before)
-        st.rerun()
-
-    # ── Step 2 & 3：判斷 clean_df 是否存在 ──
-    current_df = st.session_state.get("clean_df")
-    
-    if current_df is not None:
-        st.markdown("---")
-        st.markdown("### 📉 Step 2：統計篩選")
-        
-        c1, c2, c3 = st.columns(3)
-        cv_t = c1.slider("CV 門檻", 0.0, 0.1, 0.01, 0.001, format="%.3f", key="s2_cv")
-        jr_t = c2.slider("Jump Ratio 門檻", 0.1, 1.0, 0.5, 0.05, key="s2_jr")
-        ac_t = c3.slider("ACF 門檻", 0.0, 0.5, 0.2, 0.05, key="s2_ac")
-
-        if st.button("📉 執行統計篩選", key="do_stat_filter", type="primary"):
-            snapshot_before = current_df.copy()
-            with st.spinner("篩選中..."):
-                filtered_df, dropped_info = filter_columns_by_stats(
-                    current_df, cv_threshold=cv_t, 
-                    jump_ratio_threshold=jr_t, acf_threshold=ac_t
-                )
-                if "BatchID" in current_df.columns and "BatchID" not in filtered_df.columns:
-                    filtered_df.insert(0, "BatchID", current_df["BatchID"])
-
-            st.session_state["clean_df"] = filtered_df
-            removed = sorted(set(snapshot_before.columns) - set(filtered_df.columns))
-            _push_op("stat_filter", removed, [], snapshot_before, reason_map=dropped_info)
+        # ── Step 1：自動特徵工程 ──
+        st.markdown("### 🔧 Step 1：自動特徵工程")
+        if st.button("🔧 執行特徵工程", key="run_fe", type="primary"):
+            snapshot_before = selected_process_df.copy()
+            with st.spinner("清理中..."):
+                # 確保傳入的是 DataFrame
+                clean_df, _ = clean_process_features_with_log(selected_process_df, id_col="BatchID")
+            
+            st.session_state["clean_df"] = clean_df
+            removed = sorted(set(snapshot_before.columns) - set(clean_df.columns))
+            added = sorted(set(clean_df.columns) - set(snapshot_before.columns))
+            _push_op("auto_clean", removed, added, snapshot_before)
             st.rerun()
 
-        # ── Step 3：當前特徵總覽 ──
-        st.markdown("---")
-        st.markdown("### 📊 Step 3：當前特徵總覽 & 個別管理")
+        # ── 獲取最新狀態 ──
+        current_df = st.session_state.get("clean_df")
         
-        numeric_cols = current_df.select_dtypes(include=["number"]).columns.tolist()
-        non_batch_num = [c for c in numeric_cols if c != "BatchID"]
+        if current_df is not None:
+            st.markdown("---")
+            st.markdown("### 📉 Step 2：統計篩選")
+            
+            sc1, sc2, sc3 = st.columns(3)
+            cv_t = sc1.slider("CV 門檻", 0.0, 0.1, 0.01, 0.001, format="%.3f", key="s2_cv_val")
+            jr_t = sc2.slider("Jump Ratio 門檻", 0.1, 1.0, 0.5, 0.05, key="s2_jr_val")
+            ac_t = sc3.slider("ACF 門檻", 0.0, 0.5, 0.2, 0.05, key="s2_ac_val")
 
-        m1, m2, m3 = st.columns(3)
-        m1.metric("總欄位數", current_df.shape[1])
-        m2.metric("數值欄位", len(non_batch_num))
-        m3.metric("樣本數", current_df.shape[0])
+            if st.button("📉 執行統計篩選", key="btn_stat_filter", type="primary"):
+                snapshot_before = current_df.copy()
+                with st.spinner("計算中..."):
+                    filtered_df, dropped_info = filter_columns_by_stats(
+                        current_df, cv_threshold=cv_t, 
+                        jump_ratio_threshold=jr_t, acf_threshold=ac_t
+                    )
+                    # 確保 ID 存在
+                    if "BatchID" in current_df.columns and "BatchID" not in filtered_df.columns:
+                        filtered_df.insert(0, "BatchID", current_df["BatchID"])
 
-        search_q = st.text_input("🔍 搜尋欄位關鍵字", key="fe_search_box")
-        display_cols = [c for c in non_batch_num if search_q.lower() in c.lower()] if search_q else non_batch_num
+                st.session_state["clean_df"] = filtered_df
+                removed = sorted(set(snapshot_before.columns) - set(filtered_df.columns))
+                _push_op("stat_filter", removed, [], snapshot_before, reason_map=dropped_info)
+                st.rerun()
 
-        for col in display_cols:
-            with st.expander(f"**{col[:75]}**"):
-                el, er = st.columns([5, 1])
-                with el:
-                    try:
+            st.markdown("---")
+            st.markdown("### 📊 Step 3：特徵總覽")
+            
+            num_cols = current_df.select_dtypes(include=["number"]).columns.tolist()
+            feat_cols = [c for c in num_cols if c != "BatchID"]
+
+            m1, m2, m3 = st.columns(3)
+            m1.metric("總欄位", current_df.shape[1])
+            m2.metric("特徵數", len(feat_cols))
+            m3.metric("批次數", current_df.shape[0])
+
+            search = st.text_input("🔍 搜尋欄位", key="search_feat")
+            display_list = [c for c in feat_cols if search.lower() in c.lower()] if search else feat_cols
+
+            for col in display_list:
+                with st.expander(f"📈 {col}", expanded=False):
+                    el, er = st.columns([5, 1])
+                    with el:
                         fig = _mini_trend(current_df, col)
-                        st.pyplot(fig)
-                        plt.close()
-                    except: st.caption("繪圖失敗")
-                with er:
-                    st.write("")
-                    if st.button("🗑️ 刪除", key=f"drop_{col}"):
-                        snap = current_df.copy()
-                        st.session_state["clean_df"] = current_df.drop(columns=[col])
-                        _push_op("manual_drop", [col], [], snap)
-                        st.rerun()
-
+                        if fig:
+                            st.pyplot(fig)
+                            plt.close(fig)
+                        else:
+                            st.caption("無效數據")
+                    with er:
+                        if st.button("🗑️", key=f"del_{col}"):
+                            snap = current_df.copy()
+                            st.session_state["clean_df"] = current_df.drop(columns=[col])
+                            _push_op("manual_drop", [col], [], snap)
+                            st.rerun()
