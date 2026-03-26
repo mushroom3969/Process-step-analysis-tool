@@ -278,7 +278,7 @@ def render(selected_process_df):
                     "Min":  round(np.min(arr), 4) if len(arr) else None,
                     "Max":  round(np.max(arr), 4) if len(arr) else None,
                 })
-            st.dataframe(pd.DataFrame(summary_rows), width="stretch", hide_index=True)
+            st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
             st.success("✅ 分類完成！可至「📐 統計檢定分析」頁面進行組間檢定。")
 
     # ══════════════════════════════════════════════════════════

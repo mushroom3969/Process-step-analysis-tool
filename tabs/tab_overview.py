@@ -19,11 +19,11 @@ def render(raw_df, dfs_dict, selected_process_df, selected_process):
     col3.metric("製程步驟數", len(dfs_dict))
 
     st.markdown("#### 製程步驟欄位統計")
-    st.dataframe(process_step_count(raw_df), width="stretch", hide_index=True)
+    st.dataframe(process_step_count(raw_df), use_container_width=True, hide_index=True)
 
     st.markdown("#### 原始資料預覽")
-    st.dataframe(raw_df.head(10), width="stretch")
+    st.dataframe(raw_df.head(10), use_container_width=True)
 
     if selected_process_df is not None:
         st.markdown(f"#### 已選製程：`{selected_process}` — 欄位預覽")
-        st.dataframe(selected_process_df.head(10), width="stretch")
+        st.dataframe(selected_process_df.head(10), use_container_width=True)

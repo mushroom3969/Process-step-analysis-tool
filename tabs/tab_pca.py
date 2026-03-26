@@ -112,7 +112,7 @@ def render(selected_process_df):
             tf = topfeat.copy()
             tf["feature_name"] = tf["feature"].apply(
                 lambda x: feat_names[int(x)] if str(x).isdigit() and int(x) < len(feat_names) else str(x))
-            st.dataframe(tf, width="stretch", hide_index=True)
+            st.dataframe(tf, use_container_width=True, hide_index=True)
 
     with subtabs[2]:
         st.markdown("#### Hotelling T² — 各 Batch 異常程度")
@@ -155,7 +155,7 @@ def render(selected_process_df):
             lambda v: "🔴 >99%" if v>thres_99 else "🟠 >95%" if v>thres_95
             else "🟡 >68%" if v>thres_68 else "🟢 Normal")
         st.dataframe(ht2_df.sort_values("T²", ascending=False).reset_index(drop=True),
-                     width="stretch", hide_index=True)
+                     use_container_width=True, hide_index=True)
 
     with subtabs[3]:
         st.markdown("#### 選擇要分析的 Batch")
@@ -180,7 +180,7 @@ def render(selected_process_df):
             ax.set_title(f"Total T² Contribution — {sel_batch}", fontsize=13)
             ax.invert_yaxis(); ax.grid(axis="x", linestyle="--", alpha=0.5)
             plt.tight_layout(); st.pyplot(fig); plt.close()
-            st.dataframe(df_c, width="stretch", hide_index=True)
+            st.dataframe(df_c, use_container_width=True, hide_index=True)
             # PC decomposition
             t2_per_pc = (scores[sample_i,:]**2)/ev
             fig2, ax2 = plt.subplots(figsize=(8,4))
@@ -204,4 +204,4 @@ def render(selected_process_df):
             ax.set_title(f"PC{sel_pc+1} Contribution — {sel_batch}", fontsize=13)
             ax.invert_yaxis(); ax.grid(axis="x", linestyle="--", alpha=0.5)
             plt.tight_layout(); st.pyplot(fig); plt.close()
-            st.dataframe(df_pc, width="stretch", hide_index=True)
+            st.dataframe(df_pc, use_container_width=True, hide_index=True)

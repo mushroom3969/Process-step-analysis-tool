@@ -28,7 +28,7 @@ def render(selected_process_df):
         st.metric("含缺失值的欄位數", len(summary_df))
         st.dataframe(
             summary_df.style.background_gradient(cmap="Reds", subset=["Missing Ratio (%)"]),
-            width="stretch",
+            use_container_width=True,
         )
 
         st.markdown("#### 缺失值熱圖")
@@ -67,4 +67,4 @@ def render(selected_process_df):
                 filtered = filtered.drop(columns=cols_to_drop)
             st.session_state["clean_df"] = filtered
             st.success(f"✅ 移除後：{filtered.shape[0]} 筆 × {filtered.shape[1]} 欄")
-            st.dataframe(filtered.head(), width="stretch")
+            st.dataframe(filtered.head(), use_container_width=True)

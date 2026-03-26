@@ -90,7 +90,7 @@ def _render_rf_tab(fi_subtab, X_fi, y_fi, top_n_fi):
         c1.metric("訓練集 R²", f"{r2:.3f}")
         c2.metric("特徵數", X_fi.shape[1])
         st.dataframe(perm_df.style.background_gradient(cmap="Blues", subset=["Perm_Importance"]),
-                     width="stretch", hide_index=True)
+                     use_container_width=True, hide_index=True)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -148,7 +148,7 @@ def _render_lasso_tab(fi_subtab, X_fi, y_fi, top_n_fi):
             return
 
         coef_df   = st.session_state["lasso_coef_df"]
-        best_alpha= st.session_state["lasso_alpha"]
+        best_alpha= st.session_state["lasso_alpha_val"]
         r2_lasso  = st.session_state["lasso_r2"]
         n_nonzero = st.session_state["lasso_n_nonzero"]
 
@@ -176,7 +176,7 @@ def _render_lasso_tab(fi_subtab, X_fi, y_fi, top_n_fi):
 
         st.caption("係數已在標準化特徵上計算，數值可直接比較特徵相對影響力。")
         st.dataframe(coef_df.style.background_gradient(cmap="RdBu_r", subset=["Coefficient"]),
-                     width="stretch", hide_index=True)
+                     use_container_width=True, hide_index=True)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -311,9 +311,27 @@ def _render_shap_tab(fi_subtab, X_fi, y_fi, top_n_fi):
                         # 在固定 f1 時，f2 對 f1 SHAP 值解釋能力的貢獻
                         # 實務上我們會用 std(SHAP_f1 | f2_bins)
                         # 為簡化 Streamlit 運行，我們呈現剛才計算的綜合排名，但標示為 SHAP 導向
+                        # Compute coupling as std of |SHAP_f1| binned by f2 values
+                        f1_idx = list(X_fi.columns).index(f1)
+                        f2_vals = X_fi[f2].values
+                        shap_f1 = np.abs(shap_arr[:, f1_idx])
+                        try:
+                            bins = np.percentile(f2_vals[~np.isnan(f2_vals)], [0,33,67,100])
+                            bins = np.unique(bins)
+                            if len(bins) > 2:
+                                grp_means = []
+                                for b_lo, b_hi in zip(bins[:-1], bins[1:]):
+                                    mask = (f2_vals >= b_lo) & (f2_vals <= b_hi)
+                                    if mask.sum() > 0:
+                                        grp_means.append(shap_f1[mask].mean())
+                                coupling = float(np.std(grp_means)) if len(grp_means) > 1 else 0.0
+                            else:
+                                coupling = 0.0
+                        except Exception:
+                            coupling = 0.0
                         interaction_list.append({
                             "交互組合": f"{f1} ↔ {f2}",
-                            "SHAP 耦合指數": np.random.uniform(0.1, 0.5) # 這裡建議替換為實際矩陣計算
+                            "SHAP 耦合指數": round(coupling, 4),
                         })
                 
                 inter_df = pd.DataFrame(interaction_list).sort_values("SHAP 耦合指數", ascending=False)
@@ -445,7 +463,7 @@ def _render_pls_tab(fi_subtab, X_fi, y_fi, top_n_fi):
             plt.tight_layout(); st.pyplot(fig); plt.close()
             st.caption("VIP ≥ 1.0（紅色）= 對目標變數有顯著影響。")
             st.dataframe(vip_df.style.background_gradient(cmap="Reds", subset=["VIP"]),
-                                 width="stretch", hide_index=True)
+                                 use_container_width=True, hide_index=True)
 
         with pls_subtabs[1]:
             st.markdown("**PLS 迴歸係數**（標準化空間，反映各特徵對 Y 的線性貢獻方向和大小）")
@@ -459,11 +477,11 @@ def _render_pls_tab(fi_subtab, X_fi, y_fi, top_n_fi):
             ax.grid(axis="x", linestyle="--", alpha=0.5)
             plt.tight_layout(); st.pyplot(fig); plt.close()
             st.dataframe(reg_coef_df.style.background_gradient(cmap="RdBu_r", subset=["PLS_Coef"]),
-                                 width="stretch", hide_index=True)
+                                 use_container_width=True, hide_index=True)
 
         with pls_subtabs[2]:
             st.markdown("**X Loadings（P）** — 原始特徵在各主成分上的載荷（特徵與主成分的相關性）")
-            st.dataframe(x_load.style.background_gradient(cmap="RdBu_r"), width="stretch")
+            st.dataframe(x_load.style.background_gradient(cmap="RdBu_r"), use_container_width=True)
             # Heatmap
             fig, ax = plt.subplots(figsize=(max(6, n_pls*1.5), max(6, len(X_fi.columns)*0.35)))
             sns.heatmap(x_load, annot=True, fmt=".3f", cmap="RdBu_r",
@@ -473,7 +491,7 @@ def _render_pls_tab(fi_subtab, X_fi, y_fi, top_n_fi):
 
         with pls_subtabs[3]:
             st.markdown("**X Weights（W）** — 特徵對 PLS 潛在變數（latent score）的貢獻權重")
-            st.dataframe(x_weights.style.background_gradient(cmap="RdBu_r"), width="stretch")
+            st.dataframe(x_weights.style.background_gradient(cmap="RdBu_r"), use_container_width=True)
             fig, ax = plt.subplots(figsize=(max(6, n_pls*1.5), max(6, len(X_fi.columns)*0.35)))
             sns.heatmap(x_weights, annot=True, fmt=".3f", cmap="RdBu_r",
                         center=0, linewidths=0.3, ax=ax, annot_kws={"size":7})

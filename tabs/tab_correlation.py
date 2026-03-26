@@ -42,7 +42,7 @@ def render(selected_process_df):
                 corr_rank.style.background_gradient(
                     cmap="RdBu_r", subset=["Correlation"], vmin=-1, vmax=1
                 ),
-                width="stretch", hide_index=True,
+                use_container_width=True, hide_index=True,
             )
             st.session_state["target_col"] = target_col
             st.session_state["corr_rank"]  = corr_rank

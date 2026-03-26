@@ -630,7 +630,7 @@ def render(selected_process_df):
                          else "" for v in col],
             axis=0,
         )
-        st.dataframe(norm_style, width="stretch", hide_index=True)
+        st.dataframe(norm_style, use_container_width=True, hide_index=True)
 
         if all_normal:
             st.success("✅ 所有組別通過常態性檢定（p > 0.05）")
@@ -743,7 +743,7 @@ def render(selected_process_df):
         desc_df = pd.DataFrame(desc_rows)
         st.dataframe(
             desc_df.style.background_gradient(cmap="Blues", subset=["Mean"]),
-            width="stretch", hide_index=True,
+            use_container_width=True, hide_index=True,
         )
 
     # ── Tab 3: Post-hoc ───────────────────────────────────────
@@ -777,7 +777,7 @@ def render(selected_process_df):
 | n | {len(a0)} | {len(a1)} |
 | Mean | {a0.mean():.4f} | {a1.mean():.4f} |
 | Median | {float(np.median(a0)):.4f} | {float(np.median(a1)):.4f} |
-| SD | {a0.std(ddof=1):.4f if len(a0)>1 else "—"} | {a1.std(ddof=1):.4f if len(a1)>1 else "—"} |
+| SD | {f"{a0.std(ddof=1):.4f}" if len(a0)>1 else "—"} | {f"{a1.std(ddof=1):.4f}" if len(a1)>1 else "—"} |
 | Mean Diff ({lbl_list[0]} − {lbl_list[1]}) | {mean_diff:.4f} | |
 | 95% CI of Diff | [{ci0_str}, {ci1_str}] | |
 """)
@@ -819,14 +819,17 @@ def render(selected_process_df):
                 )
                 if sig_col is None:
                     return df
+                def _is_sig(val):
+                    """Accept bool True (Tukey) or string "✅" (nonparam)."""
+                    return val is True or "✅" in str(val)
                 return df.style.apply(
                     lambda row: [
-                        "background-color: #d4edda" if "✅" in str(row.get(sig_col, "")) else ""
+                        "background-color: #d4edda" if _is_sig(row.get(sig_col, "")) else ""
                     ] * len(row),
                     axis=1,
                 )
 
-            st.dataframe(_style_posthoc(posthoc), width="stretch", hide_index=True)
+            st.dataframe(_style_posthoc(posthoc), use_container_width=True, hide_index=True)
 
             # ── 成對相關係數（Pearson / Spearman）────────────────
             st.markdown("---")
@@ -866,7 +869,7 @@ def render(selected_process_df):
                     corr_df.style.background_gradient(
                         cmap="RdBu_r", subset=[r_col], vmin=-1, vmax=1
                     ) if r_col in corr_df.columns else corr_df,
-                    width="stretch", hide_index=True,
+                    use_container_width=True, hide_index=True,
                 )
 
     # ── Tab 4: Effect Size ────────────────────────────────────
