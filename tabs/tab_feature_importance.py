@@ -229,11 +229,17 @@ def _render_history_panel():
     """側邊顯示所有操作歷史與整批反悔按鈕。"""
     log = st.session_state.get("fe_op_log", [])
     if not log:
-        st.caption("尚無操作記錄。")
+        st.caption("目前無特徵工程操作記錄。")
         return
 
+    # 建議在 log 的 entry 中加入一個 timestamp 或 uuid 作為唯一標記
     for i, entry in enumerate(reversed(log)):
+        # 原始索引位置
         idx = len(log) - 1 - i
+        # 建立更強健的唯一 Key
+        op_time = entry.get("timestamp", idx)
+        unique_key_prefix = f"fe_hist_{idx}_{op_time}"
+
         op_label = {
             "auto_clean":   "🔧 自動特徵工程",
             "stat_filter":  "📉 統計篩選",
@@ -242,38 +248,37 @@ def _render_history_panel():
 
         n_rm = len(entry["cols_removed"])
         n_add = len(entry["cols_added"])
-        label_parts = []
-        if n_rm:  label_parts.append(f"-{n_rm}")
-        if n_add: label_parts.append(f"+{n_add}")
-        badge = " | ".join(label_parts)
+        badge = " | ".join(filter(None, [f"-{n_rm}" if n_rm else "", f"+{n_add}" if n_add else ""]))
 
         with st.expander(f"**#{idx+1}** {op_label}  `{badge}`", expanded=False):
             if entry["cols_removed"]:
-                st.markdown("🗑️ " + "、".join(
-                    [c[:30] for c in entry["cols_removed"][:8]]
-                ) + ("..." if len(entry["cols_removed"]) > 8 else ""))
+                st.markdown("🗑️ " + "、".join([c[:30] for c in entry["cols_removed"][:8]]) + 
+                            ("..." if len(entry["cols_removed"]) > 8 else ""))
             if entry["cols_added"]:
-                st.markdown("➕ " + "、".join(
-                    [c[:30] for c in entry["cols_added"][:8]]
-                ) + ("..." if len(entry["cols_added"]) > 8 else ""))
+                st.markdown("➕ " + "、".join([c[:30] for c in entry["cols_added"][:8]]) + 
+                            ("..." if len(entry["cols_added"]) > 8 else ""))
 
-            if st.button(f"↩️ 整批反悔此操作", key=f"undo_batch_{idx}",
+            # 修正關鍵：使用 unique_key 並設定新版寬度參數
+            if st.button(f"↩️ 復原至此步驟前", 
+                         key=f"undo_btn_{unique_key_prefix}",
                          type="secondary"):
-                # 整批還原：把 snapshot 當作 clean_df
+                # 還原邏輯
                 st.session_state["clean_df"] = entry["snapshot"].copy()
-                # 移除這筆及之後所有紀錄
                 st.session_state["fe_op_log"] = st.session_state["fe_op_log"][:idx]
-                st.toast(f"✅ 已整批還原操作 #{idx+1}", icon="↩️")
+                st.toast(f"✅ 已還原至步驟 #{idx+1} 之前的狀態", icon="↩️")
                 st.rerun()
 
-    if st.button("🔄 完全重置（回到特徵工程前）",
-                 key="fe_full_reset", type="secondary"):
+    st.divider()
+    if st.button("🔄 完全重置（回到初始狀態）",
+                 key="fe_full_reset_global", 
+                 type="primary", # 改為 primary 提醒這是重大操作
+                 width="stretch"): # 修正原本警告的用詞
         base = st.session_state.get("fe_base_df")
         if base is not None:
             st.session_state["clean_df"] = base.copy()
             st.session_state["fe_op_log"] = []
             st.session_state["fe_stat_dropped"] = {}
-            st.toast("✅ 已完全重置", icon="🔄")
+            st.toast("✅ 數據已回到特徵工程起始點", icon="🔄")
             st.rerun()
 
 
