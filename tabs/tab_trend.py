@@ -508,7 +508,7 @@ def render(selected_process_df):
         # ── X / Y / 圖表類型 ──────────────────────────────────
         c1, c2, c3 = st.columns(3)
         # 修改點：使用 plot_options 替代 numeric_cols
-        feat_x = c1.selectbox("X 軸特徵", plot_options, index=0, key="cz_feat_x") # 預設選 index
+        feat_x = c1.selectbox("X 軸特徵", plot_options, index=0, key="cz_feat_x")
         
         # 修改點：Y 軸排除掉目前選中的 feat_x
         y_options = [c for c in plot_options if c != feat_x]
