@@ -490,39 +490,47 @@ def _render_correlation_heatmap(X_fi, top_n_fi):
     繪製 Top N 個重要特徵之間的相關性熱點圖，協助初步發現潛在交互作用。
     """
     with st.spinner("生成相關性矩陣中..."):
-        st.markdown("#### Top 特徵相關性矩陣 (初步交互作用探索)")
-        st.caption("觀察 Top 特徵之間的線性相關程度。高相關性的特徵對（深紅或深藍）通常是交互作用分析的關鍵起點。")
+        st.markdown("#### Top 特徵相關性矩陣")
+        st.caption("觀察 Top 特徵之間的聯動關係。")
         
-        # 從 Session State 取得 RF Permutation Importance 的結果
         fi_df = st.session_state.get("fi_perm_df")
         if fi_df is None:
-            st.warning("請先在「RF 重要性」分頁訓練 Random Forest 模型，以確定 Top 特徵。")
+            st.warning("請先執行 RF 訓練。")
             return
             
-        # 取得 Top N 特徵清單
         top_feats = fi_df["Feature"].head(top_n_fi).tolist()
-        
-        # 計算相關性矩陣
         corr = X_fi[top_feats].corr()
         
-        # 繪圖
-        fig, ax = plt.subplots(figsize=(max(8, top_n_fi*0.4), max(6, top_n_fi*0.35)))
+        # 💡 關鍵修正 1：根據特徵數量動態調整圖表大小
+        fig_width = max(10, top_n_fi * 0.7)
+        fig_height = max(8, top_n_fi * 0.6)
+        fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+        
+        # 💡 關鍵修正 2：動態調整 Annot 字體大小，避免數字擠在一起
+        annot_size = 8 if top_n_fi <= 10 else 6
+        
         sns.heatmap(
             corr, 
             annot=True, 
             fmt=".2f", 
             cmap="RdBu_r", 
             center=0, 
-            linewidths=0.3, 
             ax=ax, 
-            annot_kws={"size": max(6, 12 - top_n_fi//4)}, # 根據 N 動態調整字體大小
+            annot_kws={"size": annot_size},
             cbar_kws={"shrink": 0.8}
         )
-        ax.set_title(f"Top {top_n_fi} Features Correlation Heatmap", fontsize=13)
+        
+        # 💡 關鍵修正 3：旋轉標籤並進行截斷或調整
+        plt.xticks(rotation=45, ha='right', fontsize=9)
+        plt.yticks(fontsize=9)
+        
+        ax.set_title(f"Top {top_n_fi} Features Correlation Heatmap", fontsize=14, pad=20)
+        
+        # 💡 關鍵修正 4：強制使用 tight_layout 並增加邊距
         plt.tight_layout()
+        
         st.pyplot(fig)
         plt.close()
-        st.info("💡 **提示：** 此為線性相關性。更複雜的非線性交互作用請移步「🔮 SHAP 分析」分頁下的 Dependence Plot 觀察。")
 
 def _render_interaction_ranking(X_fi, top_n_fi):
     """
