@@ -265,156 +265,98 @@ def _render_history_panel():
 # ── 主 render ─────────────────────────────────────────────────────────────────
 # ══════════════════════════════════════════════════════════════════════════════
 
-def render(selected_process_df):
-    _init_fe_state()
-    st.header("特徵工程 & 清理")
-    if selected_process_df is None:
-        st.info("請先在側欄選擇製程步驟。")
-        return
-        # 全域平均線顯示控制
-    show_mean = st.checkbox("📊 圖表顯示平均線與 ±1σ 色帶", value=True, key="fe_show_mean")
-
-    main_col, hist_col = st.columns([3, 1])
-
-    with hist_col:
-        st.markdown("### 📜 操作歷史")
-        _render_history_panel()
-
-    with main_col:
-        _render_main(selected_process_df, show_mean)
-
-
 def _render_main(selected_process_df, show_mean: bool = True):
-    """主操作區（左側 3/4）。"""
+    """主操作區（穩定版邏輯）"""
 
     # ══════════════════════════════════════════════════════════
-    # ── 區塊 A：自動特徵工程 ──────────────────────────────────
+    # ── 區塊 A：Step 1 自動特徵工程 ───────────────────────────
     # ══════════════════════════════════════════════════════════
     st.markdown("### 🔧 Step 1：自動特徵工程")
-    st.markdown("""
-    **自動執行以下規則：**
-    - 🗑️ 過濾含有 `Verification Result` / `No (na)` 關鍵字的欄位
-    - ➕ 配對 Max/Min、After/Before、End/Start → 計算差值欄位
-    - 🔢 數字編號欄位（如 `_1`、`_2`）→ 取平均後合併
-    """)
-
+    
     if st.button("🔧 執行特徵工程", key="run_fe", type="primary"):
         snapshot_before = selected_process_df.copy()
         with st.spinner("處理中..."):
             clean_df, drop_log = clean_process_features_with_log(
                 selected_process_df, id_col="BatchID"
             )
-
-        cols_before = set(selected_process_df.columns)
-        cols_after  = set(clean_df.columns)
-        removed = sorted(cols_before - cols_after)
-        added   = sorted(cols_after  - cols_before)
-
-        st.session_state["fe_base_df"]      = snapshot_before
-        st.session_state["clean_df"]        = clean_df
-        st.session_state["fe_op_log"]       = []
-        st.session_state["fe_stat_result"]  = None
-        st.session_state["fe_auto_result"]  = {
-            "removed":  removed, "added": added,
-            "snap":     snapshot_before, "clean": clean_df,
-            "n_before": selected_process_df.shape[1],
-            "n_after":  clean_df.shape[1],
-        }
-        _push_op("auto_clean", removed, added, snapshot_before,
-                 reason_map={r["Column"]: r.get("Reason", "") for _, r in drop_log.iterrows()
-                              if "Column" in drop_log.columns})
-
-    # ── 顯示 Step1 結果（穩定，從 session_state 讀）──────────────────
-    _auto = st.session_state.get("fe_auto_result")
-    # 清除格式不符的舊版 session_state（key 名稱不同）
-    if _auto is not None and ("snap" not in _auto or "clean" not in _auto):
-        st.session_state["fe_auto_result"] = None
-        _auto = None
-    if _auto is not None:
-        st.success(
-            f"✅ 完成！從 {_auto['n_before']} 欄 → {_auto['n_after']} 欄"
-            f"（刪除 {len(_auto['removed'])} / 新增 {len(_auto['added'])}）"
-        )
-        _render_changed_cols(
-            df_before=_auto["snap"], df_after=_auto["clean"],
-            cols_removed=_auto["removed"], cols_added=_auto["added"],
-            source_df_for_removed=_auto["snap"],
-            section_title="Step1_auto_clean", show_mean=show_mean,
-        )
-
-    # ══════════════════════════════════════════════════════════
-    # ── 區塊 B：統計篩選 (穩定修正版) ──────────────────────────
-    # ══════════════════════════════════════════════════════════
-    if st.session_state.get("clean_df") is not None:
-        st.markdown("---")
-        st.markdown("### 📉 Step 2：統計篩選（移除低資訊量欄位）")
         
-        # 1. 準備參數
-        c1, c2, c3 = st.columns(3)
-        cv_thresh = c1.slider("CV 門檻", 0.0, 0.1, 0.01, 0.001, key="fe_cv")
-        jump_thresh = c2.slider("Jump Ratio 門檻", 0.1, 1.0, 0.5, 0.05, key="fe_jump")
-        acf_thresh = c3.slider("ACF 門檻", 0.0, 0.5, 0.1, 0.05, key="fe_acf")
+        # 更新狀態：存入 clean_df，並備份一份給 Step 2 專用
+        st.session_state["fe_base_df"] = snapshot_before
+        st.session_state["clean_df"] = clean_df
+        st.session_state["df_before_step2"] = clean_df.copy() # 重要：鎖定 Step 2 的來源
+        
+        st.session_state["fe_auto_result"] = {
+            "removed": sorted(list(set(selected_process_df.columns) - set(clean_df.columns))),
+            "added": sorted(list(set(clean_df.columns) - set(selected_process_df.columns))),
+            "snap": snapshot_before,
+            "clean": clean_df,
+            "n_before": selected_process_df.shape[1],
+            "n_after": clean_df.shape[1],
+        }
+        # 重置 Step 2 的舊結果，避免混淆
+        st.session_state["fe_stat_result"] = None 
+        st.rerun()
 
-        # 2. 按鈕執行邏輯
+    # 顯示 Step 1 結果
+    auto_res = st.session_state.get("fe_auto_result")
+    if auto_res:
+        st.success(f"✅ Step 1 完成！欄位數：{auto_res['n_before']} → {auto_res['n_after']}")
+        with st.expander("查看 Step 1 變更詳情"):
+            _render_changed_cols(
+                df_before=auto_res["snap"], df_after=auto_res["clean"],
+                cols_removed=auto_res["removed"], cols_added=auto_res["added"],
+                source_df_for_removed=auto_res["snap"],
+                section_title="Step 1 變更", show_mean=show_mean
+            )
+
+    # ══════════════════════════════════════════════════════════
+    # ── 區塊 B：Step 2 統計篩選 ───────────────────────────────
+    # ══════════════════════════════════════════════════════════
+    # 只有 Step 1 做完了，才顯示 Step 2
+    if st.session_state.get("df_before_step2") is not None:
+        st.markdown("---")
+        st.markdown("### 📉 Step 2：統計篩選")
+        
+        c1, c2, c3 = st.columns(3)
+        cv_t = c1.slider("CV 門檻", 0.0, 0.1, 0.01, 0.001, key="fe_cv")
+        jp_t = c2.slider("Jump Ratio 門檻", 0.1, 1.0, 0.5, 0.05, key="fe_jump")
+        af_t = c3.slider("ACF 門檻", 0.0, 0.5, 0.1, 0.05, key="fe_acf")
+
         if st.button("📉 執行統計篩選", key="run_stat_filter", type="primary"):
-            # 【重要】不要清空 fe_auto_result，否則 Step 1 會消失
-            
-            # 確保有 Step 2 的專屬初始備份
-            if "df_before_step2" not in st.session_state:
-                st.session_state["df_before_step2"] = st.session_state["clean_df"].copy()
-            
-            src = st.session_state["df_before_step2"]
+            # 永遠從 Step 1 的產出開始跑
+            src_df = st.session_state["df_before_step2"]
             
             try:
                 with st.spinner("篩選計算中..."):
-                    filtered_df, dropped_info = filter_columns_by_stats(
-                        src,
-                        cv_threshold=cv_thresh,
-                        jump_ratio_threshold=jump_thresh,
-                        acf_threshold=acf_thresh,
+                    f_df, d_info = filter_columns_by_stats(
+                        src_df, cv_threshold=cv_t, jump_ratio_threshold=jp_t, acf_threshold=af_t
                     )
-
-                    # 安全插入 BatchID
-                    if "BatchID" in src.columns and "BatchID" not in filtered_df.columns:
-                        filtered_df.insert(0, "BatchID", src["BatchID"])
-
-                    # 紀錄變更
-                    removed = sorted(list(set(src.columns) - set(filtered_df.columns)))
                     
-                    # 更新狀態
-                    st.session_state["clean_df"] = filtered_df
+                    if "BatchID" in src_df.columns and "BatchID" not in f_df.columns:
+                        f_df.insert(0, "BatchID", src_df["BatchID"])
+
+                    # 紀錄結果到 session_state
+                    st.session_state["clean_df"] = f_df # 更新當前數據
                     st.session_state["fe_stat_result"] = {
-                        "filtered_df": filtered_df,
-                        "removed": removed,
-                        "dropped_info": dropped_info,
-                        "snapshot": src.copy()
+                        "filtered_df": f_df,
+                        "removed": sorted(list(set(src_df.columns) - set(f_df.columns))),
+                        "dropped_info": d_info,
+                        "snapshot": src_df.copy()
                     }
-                    
-                    # 紀錄歷史
-                    _push_op("stat_filter", removed, [], src.copy(), reason_map=dropped_info)
-                    
-                    # 強制刷新，確保顯示區域讀取最新 result
                     st.rerun()
-
             except Exception as e:
-                st.error(f"篩選失敗：{e}")
+                st.error(f"篩選出錯：{e}")
 
-        # 3. 顯示結果區域 (這部分要在按鈕外面，才能持久顯示)
+        # 顯示 Step 2 結果 (這部分在按鈕外，保證顯示穩定)
         stat_res = st.session_state.get("fe_stat_result")
-        if stat_res is not None:
-            st.success(f"✅ 篩選完成：剩餘 {stat_res['filtered_df'].shape[1]} 欄")
-            
-            # 渲染變更細節
+        if stat_res:
+            st.info(f"✅ Step 2 完成！剩餘欄位：{stat_res['filtered_df'].shape[1]}")
             _render_changed_cols(
-                df_before=stat_res["snapshot"],
-                df_after=stat_res["filtered_df"],
-                cols_removed=stat_res["removed"],
-                cols_added=[],
+                df_before=stat_res["snapshot"], df_after=stat_res["filtered_df"],
+                cols_removed=stat_res["removed"], cols_added=[],
                 source_df_for_removed=stat_res["snapshot"],
-                section_title="統計篩選變更清單",
-                show_mean=show_mean
+                section_title="Step 2 變更", show_mean=show_mean
             )
-    
 # ══════════════════════════════════════════════════════════════════════════
     # ── 區塊 C：當前特徵總覽（個別管理與反悔） ────────────────────────────────
     # ══════════════════════════════════════════════════════════════════════════
