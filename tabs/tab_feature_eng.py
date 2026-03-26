@@ -437,79 +437,78 @@ def _render_main(selected_process_df, show_mean: bool = True):
     # ══════════════════════════════════════════════════════════
     if st.session_state.get("clean_df") is not None:
         clean_df = st.session_state["clean_df"]
-        op_log   = st.session_state.get("fe_op_log", [])
+        op_log = st.session_state.get("fe_op_log", [])
 
         st.markdown("---")
         st.markdown("### 📊 Step 3：當前特徵總覽 & 個別管理")
 
         numeric_cols = clean_df.select_dtypes(include=["number"]).columns.tolist()
         non_batch_num = [c for c in numeric_cols if c != "BatchID"]
-        m1, m2, m3 = st.columns(3)
-        m1.metric("當前欄位數", clean_df.shape[1])
-        m2.metric("數值欄位數", len(non_batch_num))
-        m3.metric("批次數", clean_df.shape[0])
+        
+        # 佈局 A: 數據指標
+        with st.container(border=True):
+            m1, m2, m3 = st.columns(3)
+            m1.metric("當前總欄位", clean_df.shape[1])
+            m2.metric("數值特徵", len(non_batch_num))
+            m3.metric("樣本批次數", clean_df.shape[0])
+
         if not non_batch_num:
             st.warning("目前沒有可顯示的數值欄位。")
-        return
+            return
 
-    search_q = st.text_input("🔍 欄位關鍵字篩選", key="fe_search",
-                                  placeholder="留空顯示全部...")
+        # 佈局 B: 搜尋過濾 (修正縮進)
+        search_q = st.text_input("🔍 搜尋欄位名稱", key="fe_search", placeholder="輸入關鍵字...")
+        
         display_cols = (
             [c for c in non_batch_num if search_q.lower() in c.lower()]
             if search_q.strip() else non_batch_num
         )
         st.caption(f"顯示 {len(display_cols)} / {len(non_batch_num)} 個欄位")
 
-        all_added = set()
-        for entry in op_log:
-            all_added.update(entry.get("cols_added", []))
-        all_removed_from_base = set()
-        for entry in op_log:
-            all_removed_from_base.update(entry.get("cols_removed", []))
+        # 準備記錄 (用於標籤顯示)
+        all_added = {c for entry in op_log for c in entry.get("cols_added", [])}
+        all_removed_from_base = {c for entry in op_log for c in entry.get("cols_removed", [])}
 
+        # 佈局 C: 逐欄清單
         import hashlib as _hl_ov
         for col in display_cols:
             _ch = _hl_ov.md5(col.encode()).hexdigest()[:12]
-            badge = " `🆕 新增`" if col in all_added else ""
+            badge = " :blue-background[🆕 新增]" if col in all_added else ""
+            
             with st.expander(f"**{col[:75]}**{badge}", expanded=False):
                 exp_l, exp_r = st.columns([5, 1])
 
                 with exp_l:
                     s = clean_df[col].dropna()
-                    stat_cols = st.columns(6)
-                    stat_cols[0].metric("n",       len(s))
-                    stat_cols[1].metric("Mean",    f"{s.mean():.4f}" if len(s) else "—")
-                    stat_cols[2].metric("Median",  f"{s.median():.4f}" if len(s) else "—")
-                    stat_cols[3].metric("SD",      f"{s.std(ddof=1):.4f}" if len(s) > 1 else "—")
-                    stat_cols[4].metric("Min",     f"{s.min():.4f}" if len(s) else "—")
-                    stat_cols[5].metric("Max",     f"{s.max():.4f}" if len(s) else "—")
-
+                    # 統計小卡
+                    stat_vals = {
+                        "n": len(s),
+                        "Mean": f"{s.mean():.3f}",
+                        "SD": f"{s.std():.3f}",
+                        "Max": f"{s.max():.2f}"
+                    }
+                    st.caption(f" 📊 Stats: " + " | ".join([f"**{k}**: {v}" for k, v in stat_vals.items()]))
+                    
+                    # 繪圖
                     color = "#2ca02c" if col in all_added else "#2e86ab"
                     try:
                         fig = _mini_trend(clean_df, col, color=color, show_mean=show_mean)
                         st.pyplot(fig, use_container_width=True)
                         plt.close()
                     except Exception as e:
-                        st.caption(f"繪圖失敗：{e}")
+                        st.error(f"繪圖失敗: {e}")
 
                 with exp_r:
-                    st.markdown("<br><br><br>", unsafe_allow_html=True)
-
-                    was_touched = col in all_added or col in all_removed_from_base
-                    if was_touched:
-                        if st.button("↩️ 反悔", key=f"fi_ov_undo_{_ch}",
-                                     help=f"還原此欄位的最近一次操作",
-                                     type="secondary"):
+                    st.write("") # 調整按鈕垂直位置
+                    if col in all_added:
+                        if st.button("↩️ 撤銷", key=f"fi_ov_undo_{_ch}", use_container_width=True):
                             _undo_col(col)
                             st.rerun()
 
-                    if st.button("🗑️ 刪除", key=f"fi_ov_drop_{_ch}",
-                                 help=f"手動刪除此欄位",
-                                 type="secondary"):
+                    if st.button("🗑️ 刪除", key=f"fi_ov_drop_{_ch}", type="secondary", use_container_width=True):
                         snapshot_before = clean_df.copy()
-                        new_clean = clean_df.drop(columns=[col])
-                        st.session_state["clean_df"] = new_clean
+                        st.session_state["clean_df"] = clean_df.drop(columns=[col])
                         _push_op("manual_drop", [col], [], snapshot_before)
-                        st.toast(f"🗑️ 已刪除：{col}", icon="🗑️")
+                        st.toast(f"已刪除：{col}")
                         st.rerun()
 
