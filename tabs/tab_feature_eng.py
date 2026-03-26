@@ -92,6 +92,7 @@ def _init_fe_state():
         "fe_stat_dropped":   {},
         # BUG FIX: store stat filter results separately so rerun doesn't re-trigger
         "fe_stat_result":    None,   # dict: {filtered_df, removed, added, dropped_info, snapshot}
+        "fe_auto_result":    None,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -142,13 +143,6 @@ def _render_changed_cols(df_before, df_after, cols_removed, cols_added,
         st.info("本次操作無欄位變更。")
         return
 
-    import hashlib as _hl
-    section_hash = _hl.md5(section_title.encode()).hexdigest()[:8]
-
-    def _make_key(prefix, col, i):
-        col_hash = _hl.md5(col.encode()).hexdigest()[:8]
-        return f"eng_{prefix}_{section_hash}_{i}_{col_hash}"
-
     st.markdown(f"#### {section_title}")
     st.caption(
         f"共 **{len(cols_removed)}** 個欄位被刪除／{len(cols_added)} 個欄位被新增。"
@@ -157,7 +151,10 @@ def _render_changed_cols(df_before, df_after, cols_removed, cols_added,
 
     if cols_removed:
         st.markdown("##### 🗑️ 被刪除的欄位")
-        for i, col in enumerate(cols_removed):
+        for col in cols_removed:
+            # BUG FIX: use unique key using col + op index to avoid collision
+            import hashlib as _hlx
+            _ch = _hlx.md5(("eng:" + col).encode()).hexdigest()[:12]
             with st.expander(f"🗑️  **{col[:70]}**", expanded=False):
                 c_left, c_right = st.columns([5, 1])
                 with c_left:
@@ -175,14 +172,16 @@ def _render_changed_cols(df_before, df_after, cols_removed, cols_added,
                         st.caption("（欄位已不存在，無法繪圖）")
                 with c_right:
                     st.markdown("<br><br>", unsafe_allow_html=True)
-                    if st.button("↩️ 反悔", key=_make_key("undo_rm", col, i),
+                    if st.button("↩️ 反悔", key=f"eng_undo_rm_{_ch}",
                                  help=f"還原欄位：{col}", type="secondary"):
                         _undo_col(col)
                         st.rerun()
 
     if cols_added:
         st.markdown("##### ➕ 新增的欄位")
-        for i, col in enumerate(cols_added):
+        for col in cols_added:
+            import hashlib as _hlx
+            _ch = _hlx.md5(("eng:" + col).encode()).hexdigest()[:12]
             with st.expander(f"➕  **{col[:70]}**", expanded=False):
                 c_left, c_right = st.columns([5, 1])
                 with c_left:
@@ -201,7 +200,7 @@ def _render_changed_cols(df_before, df_after, cols_removed, cols_added,
                         st.caption("（欄位已不存在）")
                 with c_right:
                     st.markdown("<br><br>", unsafe_allow_html=True)
-                    if st.button("↩️ 反悔", key=_make_key("undo_add", col, i),
+                    if st.button("↩️ 反悔", key=f"eng_undo_add_{_ch}",
                                  help=f"移除新增欄位：{col}", type="secondary"):
                         _undo_col(col)
                         st.rerun()
@@ -246,7 +245,8 @@ def _render_history_panel():
                          type="secondary"):
                 st.session_state["clean_df"] = entry["snapshot"].copy()
                 st.session_state["fe_op_log"] = st.session_state["fe_op_log"][:idx]
-                st.session_state["fe_stat_result"] = None  # clear cached stat result
+                st.session_state["fe_stat_result"] = None
+                st.session_state["fe_auto_result"]  = None
                 st.toast(f"✅ 已整批還原操作 #{idx+1}", icon="↩️")
                 st.rerun()
 
@@ -258,6 +258,7 @@ def _render_history_panel():
             st.session_state["fe_op_log"] = []
             st.session_state["fe_stat_dropped"] = {}
             st.session_state["fe_stat_result"] = None
+            st.session_state["fe_auto_result"]  = None
             st.toast("✅ 已完全重置", icon="🔄")
             st.rerun()
 
@@ -321,19 +322,23 @@ def _render_main(selected_process_df, show_mean: bool = True):
                  reason_map={r["Column"]: r.get("Reason", "") for _, r in drop_log.iterrows()
                               if "Column" in drop_log.columns})
 
-        st.success(
-            f"✅ 完成！從 {selected_process_df.shape[1]} 欄 → {clean_df.shape[1]} 欄"
-            f"（刪除 {len(removed)} / 新增 {len(added)}）"
-        )
+        st.session_state["fe_auto_result"] = {
+            "removed": removed, "added": added,
+            "snapshot_before": snapshot_before, "clean_df": clean_df,
+            "n_before": selected_process_df.shape[1], "n_after": clean_df.shape[1],
+        }
 
+    _auto = st.session_state.get("fe_auto_result")
+    if _auto is not None:
+        st.success(
+            f"✅ 完成！從 {_auto['n_before']} 欄 → {_auto['n_after']} 欄"
+            f"（刪除 {len(_auto['removed'])} / 新增 {len(_auto['added'])}）"
+        )
         _render_changed_cols(
-            df_before=selected_process_df,
-            df_after=clean_df,
-            cols_removed=removed,
-            cols_added=added,
-            source_df_for_removed=snapshot_before,
-            section_title="📋 本次變更欄位",
-            show_mean=show_mean,
+            df_before=_auto["snapshot_before"], df_after=_auto["clean_df"],
+            cols_removed=_auto["removed"], cols_added=_auto["added"],
+            source_df_for_removed=_auto["snapshot_before"],
+            section_title="Step1_auto_clean", show_mean=show_mean,
         )
 
     # ══════════════════════════════════════════════════════════
@@ -351,13 +356,13 @@ def _render_main(selected_process_df, show_mean: bool = True):
 
         c1, c2, c3 = st.columns(3)
         cv_thresh   = c1.slider("CV 門檻（低於此值剔除）",
-                                 0.0, 0.1, 0.01, 0.001, format="%.3f", key="eng_fe_cv")
+                                 0.0, 0.1, 0.01, 0.001, format="%.3f", key="eng_cv")
         jump_thresh = c2.slider("Jump Ratio 門檻（高於此值剔除）",
-                                 0.1, 1.0, 0.5, 0.05, key="eng_fe_jump")
+                                 0.1, 1.0, 0.5, 0.05, key="eng_jump")
         # BUG FIX: changed default from 0.2 → 0.1 (0.2 was too aggressive,
         # and was silently dropping almost all columns which caused the apparent "jump")
         acf_thresh  = c3.slider("ACF 門檻（低於此值剔除）",
-                                 0.0, 0.5, 0.1, 0.05, key="eng_fe_acf")
+                                 0.0, 0.5, 0.1, 0.05, key="eng_acf")
 
         if st.button("📉 執行統計篩選", key="eng_run_stat_filter"):
             snapshot_before = clean_df.copy()
@@ -380,7 +385,6 @@ def _render_main(selected_process_df, show_mean: bool = True):
                 removed = sorted(cols_before - cols_after)
                 added   = sorted(cols_after  - cols_before)
 
-                # Store results FIRST before modifying state
                 st.session_state["fe_stat_result"] = {
                     "filtered_df":  filtered_df,
                     "removed":      removed,
@@ -389,6 +393,7 @@ def _render_main(selected_process_df, show_mean: bool = True):
                     "snapshot":     snapshot_before,
                 }
 
+                st.session_state["fe_auto_result"] = None
                 # Now update clean_df and op_log
                 st.session_state["clean_df"]        = filtered_df
                 st.session_state["fe_stat_dropped"] = dropped_info
@@ -451,7 +456,7 @@ def _render_main(selected_process_df, show_mean: bool = True):
             st.warning("目前沒有可顯示的數值欄位。")
             return
 
-        search_q = st.text_input("🔍 欄位關鍵字篩選", key="eng_fe_search",
+        search_q = st.text_input("🔍 欄位關鍵字篩選", key="eng_search",
                                   placeholder="留空顯示全部...")
         display_cols = (
             [c for c in non_batch_num if search_q.lower() in c.lower()]
@@ -467,10 +472,9 @@ def _render_main(selected_process_df, show_mean: bool = True):
             all_removed_from_base.update(entry.get("cols_removed", []))
 
         for col in display_cols:
-            import hashlib as _hl
-            col_hash = _hl.md5(col.encode()).hexdigest()[:8]
             badge = " `🆕 新增`" if col in all_added else ""
-            uniq_key = f"eng_ov_{col_hash}"
+            import hashlib as _hlx
+            _ch = _hlx.md5(("eng:" + col).encode()).hexdigest()[:12]
             with st.expander(f"**{col[:75]}**{badge}", expanded=False):
                 exp_l, exp_r = st.columns([5, 1])
 
@@ -497,13 +501,13 @@ def _render_main(selected_process_df, show_mean: bool = True):
 
                     was_touched = col in all_added or col in all_removed_from_base
                     if was_touched:
-                        if st.button("↩️ 反悔", key=f"undo_ov_{uniq_key}",
+                        if st.button("↩️ 反悔", key=f"eng_undo_ov_{_ch}",
                                      help=f"還原此欄位的最近一次操作",
                                      type="secondary"):
                             _undo_col(col)
                             st.rerun()
 
-                    if st.button("🗑️ 刪除", key=f"manual_drop_{uniq_key}",
+                    if st.button("🗑️ 刪除", key=f"eng_manual_drop_{_ch}",
                                  help=f"手動刪除此欄位",
                                  type="secondary"):
                         snapshot_before = clean_df.copy()
