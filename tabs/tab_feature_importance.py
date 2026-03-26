@@ -1,4 +1,4 @@
-"""Tab 2 — 特徵工程 & 清理（含逐欄預覽 + 反悔功能）"""
+"""Tab — 特徵工程 & 清理（含逐欄預覽 + 反悔功能）"""
 import sys, os as _os
 _dir = _os.path.dirname(_os.path.abspath(__file__))
 _root = _os.path.dirname(_dir)
@@ -26,10 +26,12 @@ from utils import (
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _mini_trend(df: pd.DataFrame, col: str, color: str = "#2e86ab",
-                title_prefix: str = "", height: float = 2.8) -> plt.Figure:
+                title_prefix: str = "", height: float = 2.8,
+                show_mean: bool = True) -> plt.Figure:
     """
     單欄 batch 時序折線圖，含平均線與 ±1σ 色帶。
     X 軸依 BatchID 數字排序（若有）。
+    show_mean: 是否顯示平均線與 ±1σ 色帶。
     """
     plot_df = df.copy()
     if "BatchID" in plot_df.columns:
@@ -43,15 +45,16 @@ def _mini_trend(df: pd.DataFrame, col: str, color: str = "#2e86ab",
     fig, ax = plt.subplots(figsize=(10, height))
     sns.set_style("whitegrid")
 
-    # ±1σ 色帶
     mu    = np.nanmean(vals)
     sigma = np.nanstd(vals, ddof=1)
-    ax.fill_between(seq, mu - sigma, mu + sigma,
-                    alpha=0.12, color=color, zorder=0, label="±1σ")
 
-    # 平均線
-    ax.axhline(mu, color=color, linewidth=1.2, linestyle="--",
-               alpha=0.75, label=f"Mean: {mu:.4f}", zorder=1)
+    if show_mean:
+        # ±1σ 色帶
+        ax.fill_between(seq, mu - sigma, mu + sigma,
+                        alpha=0.12, color=color, zorder=0, label="±1σ")
+        # 平均線
+        ax.axhline(mu, color=color, linewidth=1.2, linestyle="--",
+                   alpha=0.75, label=f"Mean: {mu:.4f}", zorder=1)
 
     # 折線 + 散點
     ax.plot(seq, vals, color=color, linewidth=1.5, zorder=2)
@@ -69,7 +72,8 @@ def _mini_trend(df: pd.DataFrame, col: str, color: str = "#2e86ab",
     title = f"{title_prefix}{col[:60]}"
     ax.set_title("\n".join(textwrap.wrap(title, width=72)), fontsize=8.5, pad=5)
     ax.set_ylabel("Value", fontsize=8)
-    ax.legend(fontsize=7, loc="upper right", framealpha=0.7)
+    if show_mean:
+        ax.legend(fontsize=7, loc="upper right", framealpha=0.7)
     ax.grid(axis="y", linestyle="--", alpha=0.35)
     plt.tight_layout()
     return fig
@@ -82,22 +86,20 @@ def _mini_trend(df: pd.DataFrame, col: str, color: str = "#2e86ab",
 def _init_fe_state():
     """確保所有特徵工程相關 session_state 鍵都已初始化。"""
     defaults = {
-        "fe_base_df":        None,   # 特徵工程前的「基底」DataFrame
-        "clean_df":          None,   # 當前有效的 DataFrame
-        "fe_op_log":         [],     # 操作日誌 list[dict]
-        "fe_stat_dropped":   {},     # 統計篩選被剔除的欄位 {col: reason}
+        "fe_base_df":        None,
+        "clean_df":          None,
+        "fe_op_log":         [],
+        "fe_stat_dropped":   {},
+        # BUG FIX: store stat filter results separately so rerun doesn't re-trigger
+        "fe_stat_result":    None,   # dict: {filtered_df, removed, added, dropped_info, snapshot}
     }
     for k, v in defaults.items():
         if k not in st.session_state:
             st.session_state[k] = v
 
 
-def _push_op(op_type: str, cols_removed: list[str], cols_added: list[str],
+def _push_op(op_type: str, cols_removed: list, cols_added: list,
              snapshot_before: pd.DataFrame, reason_map: dict = None):
-    """
-    記錄一次操作到 fe_op_log。
-    snapshot_before：操作前的完整 DataFrame（用於反悔時復原）。
-    """
     st.session_state["fe_op_log"].append({
         "op_type":       op_type,
         "cols_removed":  cols_removed,
@@ -108,20 +110,11 @@ def _push_op(op_type: str, cols_removed: list[str], cols_added: list[str],
 
 
 def _undo_col(col: str):
-    """
-    反悔單一欄位：
-    - 若該欄位是「被刪除」的 → 把它加回 clean_df
-    - 若該欄位是「被新增」的 → 把它從 clean_df 移除
-    掃描 op_log 找到最近一次涉及 col 的操作，做逆操作。
-    """
     log   = st.session_state["fe_op_log"]
     cdf   = st.session_state["clean_df"]
-    base  = st.session_state["fe_base_df"]
 
-    # 找最近一筆涉及 col 的紀錄
     for entry in reversed(log):
         if col in entry["cols_removed"]:
-            # col 被刪除 → 從 snapshot_before 找回原始資料
             snap = entry["snapshot"]
             if col in snap.columns:
                 cdf = cdf.copy()
@@ -130,7 +123,6 @@ def _undo_col(col: str):
                 st.toast(f"✅ 已還原欄位：{col}", icon="↩️")
             return
         if col in entry["cols_added"]:
-            # col 是新增的 → 直接刪掉
             if col in cdf.columns:
                 cdf = cdf.drop(columns=[col])
                 st.session_state["clean_df"] = cdf
@@ -144,23 +136,15 @@ def _undo_col(col: str):
 # ── 欄位變更展示區 ────────────────────────────────────────────────────────────
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _render_changed_cols(
-    df_before: pd.DataFrame,
-    df_after: pd.DataFrame,
-    cols_removed: list[str],
-    cols_added: list[str],
-    source_df_for_removed: pd.DataFrame,
-    section_title: str,
-):
-    """
-    顯示本次操作的變更欄位清單，每個欄位有：
-    - 類型標籤（🗑️ 已刪除 / ➕ 已新增）
-    - batch 趨勢迷你圖
-    - 反悔按鈕
-    """
+def _render_changed_cols(df_before, df_after, cols_removed, cols_added,
+                          source_df_for_removed, section_title, show_mean=True):
     if not cols_removed and not cols_added:
         st.info("本次操作無欄位變更。")
         return
+
+    # Use a stable section hash so keys from different call-sites never collide
+    import hashlib as _hl
+    section_hash = _hl.md5(section_title.encode()).hexdigest()[:6]
 
     st.markdown(f"#### {section_title}")
     st.caption(
@@ -168,19 +152,21 @@ def _render_changed_cols(
         "　點擊「↩️ 反悔」可逐欄還原。"
     )
 
-    # ── 被刪除的欄位 ──────────────────────────────────────────
     if cols_removed:
         st.markdown("##### 🗑️ 被刪除的欄位")
-        for col in cols_removed:
+        for i, col in enumerate(cols_removed):
+            # Include section_hash + index so keys are globally unique
+            safe_key = col.replace(" ", "_").replace("(", "").replace(")", "")[:30]
+            uniq_key = f"{section_hash}_{i}_{safe_key}"
             with st.expander(f"🗑️  **{col[:70]}**", expanded=False):
                 c_left, c_right = st.columns([5, 1])
                 with c_left:
-                    # 用 source_df_for_removed（操作前的 df）畫圖
                     if col in source_df_for_removed.columns:
                         try:
                             fig = _mini_trend(source_df_for_removed, col,
                                               color="#e84855",
-                                              title_prefix="[刪除前] ")
+                                              title_prefix="[刪除前] ",
+                                              show_mean=show_mean)
                             st.pyplot(fig, use_container_width=True)
                             plt.close()
                         except Exception as e:
@@ -189,15 +175,16 @@ def _render_changed_cols(
                         st.caption("（欄位已不存在，無法繪圖）")
                 with c_right:
                     st.markdown("<br><br>", unsafe_allow_html=True)
-                    if st.button("↩️ 反悔", key=f"undo_{col}_{hash(col)}",
+                    if st.button("↩️ 反悔", key=f"undo_rm_{uniq_key}",
                                  help=f"還原欄位：{col}", type="secondary"):
                         _undo_col(col)
                         st.rerun()
 
-    # ── 被新增的欄位 ──────────────────────────────────────────
     if cols_added:
         st.markdown("##### ➕ 新增的欄位")
-        for col in cols_added:
+        for i, col in enumerate(cols_added):
+            safe_key = col.replace(" ", "_").replace("(", "").replace(")", "")[:30]
+            uniq_key = f"{section_hash}_{i}_{safe_key}"
             with st.expander(f"➕  **{col[:70]}**", expanded=False):
                 c_left, c_right = st.columns([5, 1])
                 with c_left:
@@ -206,7 +193,8 @@ def _render_changed_cols(
                     if col in src.columns:
                         try:
                             fig = _mini_trend(src, col, color="#2ca02c",
-                                              title_prefix="[新增] ")
+                                              title_prefix="[新增] ",
+                                              show_mean=show_mean)
                             st.pyplot(fig, use_container_width=True)
                             plt.close()
                         except Exception as e:
@@ -215,7 +203,7 @@ def _render_changed_cols(
                         st.caption("（欄位已不存在）")
                 with c_right:
                     st.markdown("<br><br>", unsafe_allow_html=True)
-                    if st.button("↩️ 反悔", key=f"undo_{col}_{hash(col)}",
+                    if st.button("↩️ 反悔", key=f"undo_add_{uniq_key}",
                                  help=f"移除新增欄位：{col}", type="secondary"):
                         _undo_col(col)
                         st.rerun()
@@ -226,20 +214,13 @@ def _render_changed_cols(
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _render_history_panel():
-    """側邊顯示所有操作歷史與整批反悔按鈕。"""
     log = st.session_state.get("fe_op_log", [])
     if not log:
-        st.caption("目前無特徵工程操作記錄。")
+        st.caption("尚無操作記錄。")
         return
 
-    # 建議在 log 的 entry 中加入一個 timestamp 或 uuid 作為唯一標記
     for i, entry in enumerate(reversed(log)):
-        # 原始索引位置
         idx = len(log) - 1 - i
-        # 建立更強健的唯一 Key
-        op_time = entry.get("timestamp", idx)
-        unique_key_prefix = f"fe_hist_{idx}_{op_time}"
-
         op_label = {
             "auto_clean":   "🔧 自動特徵工程",
             "stat_filter":  "📉 統計篩選",
@@ -248,37 +229,38 @@ def _render_history_panel():
 
         n_rm = len(entry["cols_removed"])
         n_add = len(entry["cols_added"])
-        badge = " | ".join(filter(None, [f"-{n_rm}" if n_rm else "", f"+{n_add}" if n_add else ""]))
+        label_parts = []
+        if n_rm:  label_parts.append(f"-{n_rm}")
+        if n_add: label_parts.append(f"+{n_add}")
+        badge = " | ".join(label_parts)
 
         with st.expander(f"**#{idx+1}** {op_label}  `{badge}`", expanded=False):
             if entry["cols_removed"]:
-                st.markdown("🗑️ " + "、".join([c[:30] for c in entry["cols_removed"][:8]]) + 
-                            ("..." if len(entry["cols_removed"]) > 8 else ""))
+                st.markdown("🗑️ " + "、".join(
+                    [c[:30] for c in entry["cols_removed"][:8]]
+                ) + ("..." if len(entry["cols_removed"]) > 8 else ""))
             if entry["cols_added"]:
-                st.markdown("➕ " + "、".join([c[:30] for c in entry["cols_added"][:8]]) + 
-                            ("..." if len(entry["cols_added"]) > 8 else ""))
+                st.markdown("➕ " + "、".join(
+                    [c[:30] for c in entry["cols_added"][:8]]
+                ) + ("..." if len(entry["cols_added"]) > 8 else ""))
 
-            # 修正關鍵：使用 unique_key 並設定新版寬度參數
-            if st.button(f"↩️ 復原至此步驟前", 
-                         key=f"undo_btn_{unique_key_prefix}",
+            if st.button(f"↩️ 整批反悔此操作", key=f"undo_batch_{idx}",
                          type="secondary"):
-                # 還原邏輯
                 st.session_state["clean_df"] = entry["snapshot"].copy()
                 st.session_state["fe_op_log"] = st.session_state["fe_op_log"][:idx]
-                st.toast(f"✅ 已還原至步驟 #{idx+1} 之前的狀態", icon="↩️")
+                st.session_state["fe_stat_result"] = None  # clear cached stat result
+                st.toast(f"✅ 已整批還原操作 #{idx+1}", icon="↩️")
                 st.rerun()
 
-    st.divider()
-    if st.button("🔄 完全重置（回到初始狀態）",
-                 key="fe_full_reset_global", 
-                 type="primary", # 改為 primary 提醒這是重大操作
-                 width="stretch"): # 修正原本警告的用詞
+    if st.button("🔄 完全重置（回到特徵工程前）",
+                 key="fe_full_reset", type="secondary"):
         base = st.session_state.get("fe_base_df")
         if base is not None:
             st.session_state["clean_df"] = base.copy()
             st.session_state["fe_op_log"] = []
             st.session_state["fe_stat_dropped"] = {}
-            st.toast("✅ 數據已回到特徵工程起始點", icon="🔄")
+            st.session_state["fe_stat_result"] = None
+            st.toast("✅ 已完全重置", icon="🔄")
             st.rerun()
 
 
@@ -294,7 +276,9 @@ def render(selected_process_df):
         st.info("請先在側欄選擇製程步驟。")
         return
 
-    # ── 版面：主區 + 歷史側欄 ─────────────────────────────────
+    # 全域平均線顯示控制
+    show_mean = st.checkbox("📊 圖表顯示平均線與 ±1σ 色帶", value=True, key="fe_show_mean")
+
     main_col, hist_col = st.columns([3, 1])
 
     with hist_col:
@@ -302,10 +286,10 @@ def render(selected_process_df):
         _render_history_panel()
 
     with main_col:
-        _render_main(selected_process_df)
+        _render_main(selected_process_df, show_mean)
 
 
-def _render_main(selected_process_df):
+def _render_main(selected_process_df, show_mean: bool = True):
     """主操作區（左側 3/4）。"""
 
     # ══════════════════════════════════════════════════════════
@@ -331,10 +315,10 @@ def _render_main(selected_process_df):
         removed = sorted(cols_before - cols_after)
         added   = sorted(cols_after  - cols_before)
 
-        # 儲存「基底」（特徵工程前）與操作記錄
         st.session_state["fe_base_df"] = snapshot_before
         st.session_state["clean_df"]   = clean_df
-        st.session_state["fe_op_log"]  = []   # 重新執行則清空舊記錄
+        st.session_state["fe_op_log"]  = []
+        st.session_state["fe_stat_result"] = None
         _push_op("auto_clean", removed, added, snapshot_before,
                  reason_map={r["Column"]: r.get("Reason", "") for _, r in drop_log.iterrows()
                               if "Column" in drop_log.columns})
@@ -344,7 +328,6 @@ def _render_main(selected_process_df):
             f"（刪除 {len(removed)} / 新增 {len(added)}）"
         )
 
-        # 顯示欄位變更
         _render_changed_cols(
             df_before=selected_process_df,
             df_after=clean_df,
@@ -352,10 +335,14 @@ def _render_main(selected_process_df):
             cols_added=added,
             source_df_for_removed=snapshot_before,
             section_title="📋 本次變更欄位",
+            show_mean=show_mean,
         )
 
     # ══════════════════════════════════════════════════════════
     # ── 區塊 B：統計篩選 ──────────────────────────────────────
+    # BUG FIX: Separate the "run" button from the "display results" section
+    # so that clicking the button stores results in session_state, and the
+    # display always reads from session_state — never re-executes on rerun.
     # ══════════════════════════════════════════════════════════
     if st.session_state.get("clean_df") is not None:
         clean_df = st.session_state["clean_df"]
@@ -369,36 +356,63 @@ def _render_main(selected_process_df):
                                  0.0, 0.1, 0.01, 0.001, format="%.3f", key="fe_cv")
         jump_thresh = c2.slider("Jump Ratio 門檻（高於此值剔除）",
                                  0.1, 1.0, 0.5, 0.05, key="fe_jump")
+        # BUG FIX: changed default from 0.2 → 0.1 (0.2 was too aggressive,
+        # and was silently dropping almost all columns which caused the apparent "jump")
         acf_thresh  = c3.slider("ACF 門檻（低於此值剔除）",
-                                 0.0, 0.5, 0.2, 0.05, key="fe_acf")
+                                 0.0, 0.5, 0.1, 0.05, key="fe_acf")
 
         if st.button("📉 執行統計篩選", key="run_stat_filter"):
             snapshot_before = clean_df.copy()
-            with st.spinner("篩選中..."):
-                filtered_df, dropped_info = filter_columns_by_stats(
-                    clean_df,
-                    cv_threshold=cv_thresh,
-                    jump_ratio_threshold=jump_thresh,
-                    acf_threshold=acf_thresh,
-                )
-                if "BatchID" in clean_df.columns and "BatchID" not in filtered_df.columns:
-                    filtered_df.insert(0, "BatchID", clean_df["BatchID"])
+            # BUG FIX: wrap in try/except and store ALL results in session_state
+            # before any st.rerun() or widget rendering occurs
+            try:
+                with st.spinner("篩選中..."):
+                    filtered_df, dropped_info = filter_columns_by_stats(
+                        clean_df,
+                        cv_threshold=cv_thresh,
+                        jump_ratio_threshold=jump_thresh,
+                        acf_threshold=acf_thresh,
+                    )
+                    # Always keep BatchID
+                    if "BatchID" in clean_df.columns and "BatchID" not in filtered_df.columns:
+                        filtered_df.insert(0, "BatchID", clean_df["BatchID"])
 
-            cols_before = set(clean_df.columns)
-            cols_after  = set(filtered_df.columns)
-            removed = sorted(cols_before - cols_after)
-            added   = sorted(cols_after  - cols_before)
+                cols_before = set(clean_df.columns)
+                cols_after  = set(filtered_df.columns)
+                removed = sorted(cols_before - cols_after)
+                added   = sorted(cols_after  - cols_before)
 
-            st.session_state["clean_df"]       = filtered_df
-            st.session_state["fe_stat_dropped"] = dropped_info
-            _push_op("stat_filter", removed, added, snapshot_before,
-                     reason_map=dropped_info)
+                # Store results FIRST before modifying state
+                st.session_state["fe_stat_result"] = {
+                    "filtered_df":  filtered_df,
+                    "removed":      removed,
+                    "added":        added,
+                    "dropped_info": dropped_info,
+                    "snapshot":     snapshot_before,
+                }
 
-            st.success(
-                f"✅ 剔除 {len(removed)} 個欄位 → 剩餘 {filtered_df.shape[1]} 欄"
-            )
+                # Now update clean_df and op_log
+                st.session_state["clean_df"]        = filtered_df
+                st.session_state["fe_stat_dropped"] = dropped_info
+                _push_op("stat_filter", removed, added, snapshot_before,
+                         reason_map=dropped_info)
 
-            # 顯示統計篩選原因表
+            except Exception as e:
+                import traceback
+                st.error(f"統計篩選失敗：{e}")
+                st.code(traceback.format_exc())
+
+        # Display results from session_state (stable across reruns)
+        stat_res = st.session_state.get("fe_stat_result")
+        if stat_res is not None:
+            removed      = stat_res["removed"]
+            added        = stat_res["added"]
+            dropped_info = stat_res["dropped_info"]
+            snapshot_bef = stat_res["snapshot"]
+            filtered_df  = stat_res["filtered_df"]
+
+            st.success(f"✅ 剔除 {len(removed)} 個欄位 → 剩餘 {filtered_df.shape[1]} 欄")
+
             if dropped_info:
                 reason_df = pd.DataFrame(
                     [(k, v) for k, v in dropped_info.items()],
@@ -407,14 +421,14 @@ def _render_main(selected_process_df):
                 with st.expander("📋 被剔除欄位原因", expanded=True):
                     st.dataframe(reason_df, width="stretch", hide_index=True)
 
-            # 顯示欄位變更（含反悔）
             _render_changed_cols(
-                df_before=clean_df,
+                df_before=snapshot_bef,
                 df_after=filtered_df,
                 cols_removed=removed,
                 cols_added=added,
-                source_df_for_removed=snapshot_before,
+                source_df_for_removed=snapshot_bef,
                 section_title="📋 本次統計篩選變更欄位",
+                show_mean=show_mean,
             )
 
     # ══════════════════════════════════════════════════════════
@@ -430,7 +444,6 @@ def _render_main(selected_process_df):
         numeric_cols = clean_df.select_dtypes(include=["number"]).columns.tolist()
         non_batch_num = [c for c in numeric_cols if c != "BatchID"]
 
-        # 快速 metrics
         m1, m2, m3 = st.columns(3)
         m1.metric("當前欄位數", clean_df.shape[1])
         m2.metric("數值欄位數", len(non_batch_num))
@@ -440,7 +453,6 @@ def _render_main(selected_process_df):
             st.warning("目前沒有可顯示的數值欄位。")
             return
 
-        # ── 欄位搜尋 + 批量刪除 ──────────────────────────────
         search_q = st.text_input("🔍 欄位關鍵字篩選", key="fe_search",
                                   placeholder="留空顯示全部...")
         display_cols = (
@@ -449,8 +461,6 @@ def _render_main(selected_process_df):
         )
         st.caption(f"顯示 {len(display_cols)} / {len(non_batch_num)} 個欄位")
 
-        # ── 欄位卡片 ──────────────────────────────────────────
-        # 找出哪些欄位是「新增」的（供標注）
         all_added = set()
         for entry in op_log:
             all_added.update(entry.get("cols_added", []))
@@ -458,14 +468,14 @@ def _render_main(selected_process_df):
         for entry in op_log:
             all_removed_from_base.update(entry.get("cols_removed", []))
 
-        cols_per_row = 1   # 全寬顯示讓圖夠大
-        for i, col in enumerate(display_cols):
+        for ov_i, col in enumerate(display_cols):
             badge = " `🆕 新增`" if col in all_added else ""
+            safe_key = col.replace(" ", "_").replace("(", "").replace(")", "")[:30]
+            uniq_key = f"ov_{ov_i}_{safe_key}"
             with st.expander(f"**{col[:75]}**{badge}", expanded=False):
                 exp_l, exp_r = st.columns([5, 1])
 
                 with exp_l:
-                    # 描述統計
                     s = clean_df[col].dropna()
                     stat_cols = st.columns(6)
                     stat_cols[0].metric("n",       len(s))
@@ -475,10 +485,9 @@ def _render_main(selected_process_df):
                     stat_cols[4].metric("Min",     f"{s.min():.4f}" if len(s) else "—")
                     stat_cols[5].metric("Max",     f"{s.max():.4f}" if len(s) else "—")
 
-                    # 趨勢圖
                     color = "#2ca02c" if col in all_added else "#2e86ab"
                     try:
-                        fig = _mini_trend(clean_df, col, color=color)
+                        fig = _mini_trend(clean_df, col, color=color, show_mean=show_mean)
                         st.pyplot(fig, use_container_width=True)
                         plt.close()
                     except Exception as e:
@@ -487,22 +496,20 @@ def _render_main(selected_process_df):
                 with exp_r:
                     st.markdown("<br><br><br>", unsafe_allow_html=True)
 
-                    # 反悔按鈕（只有曾被操作過的欄位才顯示）
                     was_touched = col in all_added or col in all_removed_from_base
                     if was_touched:
-                        if st.button("↩️ 反悔", key=f"undo_ov_{i}_{col_hash}",
+                        if st.button("↩️ 反悔", key=f"undo_ov_{uniq_key}",
                                      help=f"還原此欄位的最近一次操作",
                                      type="secondary"):
                             _undo_col(col)
                             st.rerun()
 
-                    # 手動刪除按鈕
-                    if st.button("🗑️ 刪除", key=f"manual_drop_{i}_{col_hash}",
-                                     help=f"手動刪除此欄位",
-                                     type="secondary"):
+                    if st.button("🗑️ 刪除", key=f"manual_drop_{uniq_key}",
+                                 help=f"手動刪除此欄位",
+                                 type="secondary"):
                         snapshot_before = clean_df.copy()
                         new_clean = clean_df.drop(columns=[col])
                         st.session_state["clean_df"] = new_clean
                         _push_op("manual_drop", [col], [], snapshot_before)
                         st.toast(f"🗑️ 已刪除：{col}", icon="🗑️")
-                        st.rerun() # 建議刪除後 rerun 刷新列表
+                        st.rerun()
