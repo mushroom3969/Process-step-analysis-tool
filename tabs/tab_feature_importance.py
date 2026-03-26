@@ -459,7 +459,7 @@ def _render_main(selected_process_df):
             all_removed_from_base.update(entry.get("cols_removed", []))
 
         cols_per_row = 1   # 全寬顯示讓圖夠大
-        for col in display_cols:
+        for i, col in enumerate(display_cols):
             badge = " `🆕 新增`" if col in all_added else ""
             with st.expander(f"**{col[:75]}**{badge}", expanded=False):
                 exp_l, exp_r = st.columns([5, 1])
@@ -490,19 +490,19 @@ def _render_main(selected_process_df):
                     # 反悔按鈕（只有曾被操作過的欄位才顯示）
                     was_touched = col in all_added or col in all_removed_from_base
                     if was_touched:
-                        if st.button("↩️ 反悔", key=f"undo_overview_{col}",
+                        if st.button("↩️ 反悔", key=f"undo_ov_{i}_{col_hash}",
                                      help=f"還原此欄位的最近一次操作",
                                      type="secondary"):
                             _undo_col(col)
                             st.rerun()
 
                     # 手動刪除按鈕
-                    if st.button("🗑️ 刪除", key=f"manual_drop_{col}",
-                                 help=f"手動刪除此欄位",
-                                 type="secondary"):
+                    if st.button("🗑️ 刪除", key=f"manual_drop_{i}_{col_hash}",
+                                     help=f"手動刪除此欄位",
+                                     type="secondary"):
                         snapshot_before = clean_df.copy()
                         new_clean = clean_df.drop(columns=[col])
                         st.session_state["clean_df"] = new_clean
                         _push_op("manual_drop", [col], [], snapshot_before)
                         st.toast(f"🗑️ 已刪除：{col}", icon="🗑️")
-                        st.rerun()
+                        st.rerun() # 建議刪除後 rerun 刷新列表
