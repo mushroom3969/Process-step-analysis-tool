@@ -330,6 +330,10 @@ def _render_main(selected_process_df, show_mean: bool = True):
 
     # ── 顯示 Step1 結果（穩定，從 session_state 讀）──────────────────
     _auto = st.session_state.get("fe_auto_result")
+    # 清除格式不符的舊版 session_state（key 名稱不同）
+    if _auto is not None and ("snap" not in _auto or "clean" not in _auto):
+        st.session_state["fe_auto_result"] = None
+        _auto = None
     if _auto is not None:
         st.success(
             f"✅ 完成！從 {_auto['n_before']} 欄 → {_auto['n_after']} 欄"
