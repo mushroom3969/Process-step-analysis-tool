@@ -406,7 +406,7 @@ def _render_main(selected_process_df, show_mean: bool = True):
         # Display results from session_state (stable across reruns)
         stat_res = st.session_state.get("fe_stat_result")
         if stat_res is not None:
-            removed      = stat_res["removed"]
+            removed = stat_res.get("removed", [])
             added        = stat_res["added"]
             dropped_info = stat_res["dropped_info"]
             snapshot_bef = stat_res["snapshot"]
