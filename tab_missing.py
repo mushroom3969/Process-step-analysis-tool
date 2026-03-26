@@ -1,4 +1,4 @@
-"""Tab 3 — 缺失值分析"""
+"""Tab — 缺失值分析"""
 import sys, os as _os
 _dir = _os.path.dirname(_os.path.abspath(__file__))
 _root = _os.path.dirname(_dir)
@@ -32,14 +32,18 @@ def render(selected_process_df):
         )
 
         st.markdown("#### 缺失值熱圖")
-        fig, ax = plt.subplots(figsize=(14, 4))
+        n_miss_cols = len(summary_df)
+        fig_h = max(4, min(40, n_miss_cols * 0.38))
+        fig, ax = plt.subplots(figsize=(14, fig_h))
         missing_matrix = work_df[summary_df.index].isnull().T
+        font_sz = max(5, min(9, int(200 / max(n_miss_cols, 1))))
         sns.heatmap(
             missing_matrix, cmap="Reds", cbar=False, ax=ax,
-            yticklabels=[c[:40] for c in summary_df.index],
+            yticklabels=[c[:45] for c in summary_df.index],
         )
+        ax.set_yticklabels(ax.get_yticklabels(), fontsize=font_sz)
         ax.set_xlabel("Sample Index")
-        ax.set_title("Missing Value Pattern")
+        ax.set_title(f"Missing Value Pattern ({n_miss_cols} columns)")
         plt.tight_layout()
         st.pyplot(fig)
         plt.close()

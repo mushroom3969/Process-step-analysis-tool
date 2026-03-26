@@ -1,4 +1,4 @@
-"""Tab 0 — 資料總覽"""
+"""Tab — 資料總覽"""
 import sys, os as _os
 _dir = _os.path.dirname(_os.path.abspath(__file__))
 _root = _os.path.dirname(_dir)

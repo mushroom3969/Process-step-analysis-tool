@@ -1,4 +1,4 @@
-"""Tab 5 — PCA 分析（Hotelling T² + 貢獻分析）"""
+"""Tab — PCA 分析（Hotelling T² + 貢獻分析）"""
 import sys, os as _os
 _dir = _os.path.dirname(_os.path.abspath(__file__))
 _root = _os.path.dirname(_dir)
@@ -116,6 +116,7 @@ def render(selected_process_df):
 
     with subtabs[2]:
         st.markdown("#### Hotelling T² — 各 Batch 異常程度")
+        pca_show_mean = st.checkbox("顯示 T² 平均線", value=True, key="pca_show_mean_ht2")
         ht2_vals    = np.sum((scores**2)/ev, axis=1)
         n_obs       = x_scaled.shape[0]
         thres_68    = _ht2_threshold(0.32, n_obs, n_pc)
@@ -142,6 +143,11 @@ def render(selected_process_df):
         ax.set_xticklabels([str(labels[i])[-6:] for i in idx_sorted], rotation=90, fontsize=7)
         ax.set_ylabel("Hotelling T²"); ax.set_title("Hotelling T² per Batch")
         ax.legend(title="Confidence Level"); ax.grid(axis="y", linestyle="--", alpha=0.4)
+        if pca_show_mean:
+            mu_ht2 = float(np.mean(ht2_vals))
+            ax.axhline(mu_ht2, color="#7209b7", linewidth=1.2, linestyle=":",
+                       label=f"Mean T²={mu_ht2:.2f}", alpha=0.85)
+            ax.legend(title="Confidence Level")
         plt.tight_layout(); st.pyplot(fig); plt.close()
 
         ht2_df = pd.DataFrame({"Batch": labels, "T²": ht2_vals.round(3)})

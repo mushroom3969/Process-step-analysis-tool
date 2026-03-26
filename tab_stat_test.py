@@ -507,11 +507,25 @@ def render(selected_process_df):
         ["🔵 參數檢定", "🟠 非參數檢定", "🤖 自動建議"],
         key="stat_test_type",
     )
+    # BUG FIX: never use key="stat_alpha" — that key is also written to
+    # st.session_state.update() below, which causes a StreamlitAPIException.
+    # Use a distinct widget key and a separate session-state slot.
     alpha_level = test_col2.select_slider(
-        "顯著水準 α", [0.01, 0.05, 0.10], value=0.05, key="stat_alpha"
+        "顯著水準 α", [0.01, 0.05, 0.10], value=0.05, key="stat_alpha_widget"
     )
     exclude_outside = test_col3.checkbox(
         "排除 Outside Zones", value=True, key="stat_excl_outside"
+    )
+
+    # ── 相關分析選項（僅兩組時使用）────────────────────────────
+    corr_row1, corr_row2 = st.columns(2)
+    corr_method = corr_row1.radio(
+        "相關係數方法（兩組時顯示）",
+        ["pearson", "spearman"],
+        horizontal=True,
+        key="stat_corr_method",
+        format_func=lambda x: {"pearson": "Pearson r（線性）",
+                                "spearman": "Spearman ρ（非線性/排序）"}[x],
     )
 
     # ── 執行按鈕 ─────────────────────────────────────────────
@@ -574,9 +588,10 @@ def render(selected_process_df):
             "stat_zone_colors": zone_colors,
             "stat_target_col":  target_col,
             "stat_recommended": recommended,
-            "stat_alpha":       alpha_level,
+            "stat_alpha_val":   alpha_level,   # renamed: avoids widget key conflict
             "stat_all_normal":  all_normal,
             "stat_homovar":     homovar,
+            "stat_corr_method_val": corr_method,
         })
         st.success("✅ 分析完成！")
 
@@ -593,8 +608,10 @@ def render(selected_process_df):
     zone_colors = st.session_state["stat_zone_colors"]
     target_col  = st.session_state["stat_target_col"]
     recommended = st.session_state["stat_recommended"]
+    alpha_level = st.session_state.get("stat_alpha_val", 0.05)   # renamed key
     all_normal  = st.session_state["stat_all_normal"]
     homovar     = st.session_state["stat_homovar"]
+    corr_method_used = st.session_state.get("stat_corr_method_val", "pearson")
 
     res_tabs = st.tabs([
         "📋 假設檢查", "📊 Box Plot", "🧪 主檢定結果",
@@ -736,25 +753,58 @@ def render(selected_process_df):
 
         if posthoc is None:
             st.info("兩組比較無需 post-hoc 分析（主檢定即為成對比較）。")
-            # 顯示唯一一對的詳細資訊
             arr_list = list(groups.values())
             lbl_list = list(groups.keys())
             if len(arr_list) == 2:
-                a0, a1 = arr_list[0][~np.isnan(arr_list[0])], arr_list[1][~np.isnan(arr_list[1])]
+                a0 = arr_list[0][~np.isnan(arr_list[0])]
+                a1 = arr_list[1][~np.isnan(arr_list[1])]
                 mean_diff = a0.mean() - a1.mean() if len(a0) and len(a1) else np.nan
-                ci = stats.t.interval(
-                    0.95, df=len(a0)+len(a1)-2,
-                    loc=mean_diff,
-                    scale=stats.sem(np.concatenate([a0, a1]))
-                ) if len(a0) + len(a1) > 2 else (np.nan, np.nan)
+                try:
+                    ci = stats.t.interval(
+                        0.95, df=len(a0) + len(a1) - 2,
+                        loc=mean_diff,
+                        scale=stats.sem(np.concatenate([a0, a1]))
+                    )
+                except Exception:
+                    ci = (np.nan, np.nan)
+
+                # ── 兩組摘要表 ────────────────────────────────────
+                ci0_str = f"{ci[0]:.4f}" if not np.isnan(ci[0]) else "—"
+                ci1_str = f"{ci[1]:.4f}" if not np.isnan(ci[1]) else "—"
                 st.markdown(f"""
-| 項目 | 值 |
-|---|---|
-| {lbl_list[0]} Mean | {a0.mean():.4f} |
-| {lbl_list[1]} Mean | {a1.mean():.4f} |
-| Mean Diff | {mean_diff:.4f} |
-| 95% CI | [{ci[0]:.4f}, {ci[1]:.4f}] |
+| 項目 | {lbl_list[0]} | {lbl_list[1]} |
+|---|---|---|
+| n | {len(a0)} | {len(a1)} |
+| Mean | {a0.mean():.4f} | {a1.mean():.4f} |
+| Median | {float(np.median(a0)):.4f} | {float(np.median(a1)):.4f} |
+| SD | {a0.std(ddof=1):.4f if len(a0)>1 else "—"} | {a1.std(ddof=1):.4f if len(a1)>1 else "—"} |
+| Mean Diff ({lbl_list[0]} − {lbl_list[1]}) | {mean_diff:.4f} | |
+| 95% CI of Diff | [{ci0_str}, {ci1_str}] | |
 """)
+
+                # ── Spearman / Pearson 相關（連續 X → Y）────────────
+                st.markdown("---")
+                st.markdown("**相關係數分析（連續關係）**")
+                all_vals = np.concatenate([a0, a1])
+                grp_codes = np.array([0] * len(a0) + [1] * len(a1), dtype=float)
+                sym = "ρ" if corr_method_used == "spearman" else "r"
+                try:
+                    if corr_method_used == "spearman":
+                        r_val, p_val = stats.spearmanr(grp_codes, all_vals)
+                    else:
+                        r_val, p_val = stats.pearsonr(grp_codes, all_vals)
+                    stars = "***" if p_val < 0.001 else "**" if p_val < 0.01 else "*" if p_val < 0.05 else "ns"
+                    st.metric(
+                        f"{corr_method_used.capitalize()} {sym}（分組編碼 vs Y）",
+                        f"{r_val:.4f}",
+                        delta=f"p={p_val:.4f} {stars}",
+                    )
+                    if p_val < 0.05:
+                        st.success(f"✅ {sym} = {r_val:.4f}，兩組 Y 值呈顯著{'正' if r_val > 0 else '負'}相關（{stars}）")
+                    else:
+                        st.info(f"ℹ️ {sym} = {r_val:.4f}，未達顯著相關（ns）")
+                except Exception as e:
+                    st.warning(f"相關係數計算失敗：{e}")
         else:
             method_name = (
                 "Tukey HSD" if recommended == "parametric"
@@ -777,6 +827,47 @@ def render(selected_process_df):
                 )
 
             st.dataframe(_style_posthoc(posthoc), width="stretch", hide_index=True)
+
+            # ── 成對相關係數（Pearson / Spearman）────────────────
+            st.markdown("---")
+            sym = "ρ" if corr_method_used == "spearman" else "r"
+            st.markdown(f"**成對 {corr_method_used.capitalize()} {sym} 相關係數**")
+            corr_rows = []
+            lbl_list = list(groups.keys())
+            for g1, g2 in combinations(lbl_list, 2):
+                a1_c = groups[g1][~np.isnan(groups[g1])]
+                a2_c = groups[g2][~np.isnan(groups[g2])]
+                n_pair = len(a1_c) + len(a2_c)
+                grp_codes = np.array([0] * len(a1_c) + [1] * len(a2_c), dtype=float)
+                all_vals  = np.concatenate([a1_c, a2_c])
+                try:
+                    if corr_method_used == "spearman":
+                        r_v, p_v = stats.spearmanr(grp_codes, all_vals)
+                    else:
+                        r_v, p_v = stats.pearsonr(grp_codes, all_vals)
+                    stars = "***" if p_v < 0.001 else "**" if p_v < 0.01 else "*" if p_v < 0.05 else "ns"
+                    corr_rows.append({
+                        "group1": g1, "group2": g2,
+                        f"{sym}": round(float(r_v), 4),
+                        "p-value": round(float(p_v), 4),
+                        "顯著性": stars,
+                        "n": n_pair,
+                    })
+                except Exception:
+                    corr_rows.append({
+                        "group1": g1, "group2": g2,
+                        f"{sym}": None, "p-value": None,
+                        "顯著性": "—", "n": n_pair,
+                    })
+            if corr_rows:
+                corr_df = pd.DataFrame(corr_rows)
+                r_col = sym
+                st.dataframe(
+                    corr_df.style.background_gradient(
+                        cmap="RdBu_r", subset=[r_col], vmin=-1, vmax=1
+                    ) if r_col in corr_df.columns else corr_df,
+                    width="stretch", hide_index=True,
+                )
 
     # ── Tab 4: Effect Size ────────────────────────────────────
     with res_tabs[4]:
