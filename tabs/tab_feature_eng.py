@@ -170,7 +170,7 @@ def _render_changed_cols(df_before, df_after, cols_removed, cols_added,
                         st.caption("（欄位已不存在，無法繪圖）")
                 with c_right:
                     st.markdown("<br><br>", unsafe_allow_html=True)
-                    if st.button("↩️ 反悔", key=f"undo_rm_{safe_key}",
+                    if st.button("↩️ 反悔", key=f"eng_undo_rm_{safe_key}",
                                  help=f"還原欄位：{col}", type="secondary"):
                         _undo_col(col)
                         st.rerun()
@@ -197,7 +197,7 @@ def _render_changed_cols(df_before, df_after, cols_removed, cols_added,
                         st.caption("（欄位已不存在）")
                 with c_right:
                     st.markdown("<br><br>", unsafe_allow_html=True)
-                    if st.button("↩️ 反悔", key=f"undo_add_{safe_key}",
+                    if st.button("↩️ 反悔", key=f"eng_undo_add_{safe_key}",
                                  help=f"移除新增欄位：{col}", type="secondary"):
                         _undo_col(col)
                         st.rerun()
@@ -238,7 +238,7 @@ def _render_history_panel():
                     [c[:30] for c in entry["cols_added"][:8]]
                 ) + ("..." if len(entry["cols_added"]) > 8 else ""))
 
-            if st.button(f"↩️ 整批反悔此操作", key=f"undo_batch_{idx}",
+            if st.button(f"↩️ 整批反悔此操作", key=f"eng_undo_batch_{idx}",
                          type="secondary"):
                 st.session_state["clean_df"] = entry["snapshot"].copy()
                 st.session_state["fe_op_log"] = st.session_state["fe_op_log"][:idx]
@@ -247,7 +247,7 @@ def _render_history_panel():
                 st.rerun()
 
     if st.button("🔄 完全重置（回到特徵工程前）",
-                 key="fe_full_reset", type="secondary"):
+                 key="eng_full_reset", type="secondary"):
         base = st.session_state.get("fe_base_df")
         if base is not None:
             st.session_state["clean_df"] = base.copy()
@@ -271,7 +271,7 @@ def render(selected_process_df):
         return
 
     # 全域平均線顯示控制
-    show_mean = st.checkbox("📊 圖表顯示平均線與 ±1σ 色帶", value=True, key="fe_show_mean")
+    show_mean = st.checkbox("📊 圖表顯示平均線與 ±1σ 色帶", value=True, key="eng_show_mean")
 
     main_col, hist_col = st.columns([3, 1])
 
@@ -297,7 +297,7 @@ def _render_main(selected_process_df, show_mean: bool = True):
     - 🔢 數字編號欄位（如 `_1`、`_2`）→ 取平均後合併
     """)
 
-    if st.button("🔧 執行特徵工程", key="run_fe", type="primary"):
+    if st.button("🔧 執行特徵工程", key="eng_run_fe", type="primary"):
         snapshot_before = selected_process_df.copy()
         with st.spinner("處理中..."):
             clean_df, drop_log = clean_process_features_with_log(
@@ -347,15 +347,15 @@ def _render_main(selected_process_df, show_mean: bool = True):
 
         c1, c2, c3 = st.columns(3)
         cv_thresh   = c1.slider("CV 門檻（低於此值剔除）",
-                                 0.0, 0.1, 0.01, 0.001, format="%.3f", key="fe_cv")
+                                 0.0, 0.1, 0.01, 0.001, format="%.3f", key="eng_fe_cv")
         jump_thresh = c2.slider("Jump Ratio 門檻（高於此值剔除）",
-                                 0.1, 1.0, 0.5, 0.05, key="fe_jump")
+                                 0.1, 1.0, 0.5, 0.05, key="eng_fe_jump")
         # BUG FIX: changed default from 0.2 → 0.1 (0.2 was too aggressive,
         # and was silently dropping almost all columns which caused the apparent "jump")
         acf_thresh  = c3.slider("ACF 門檻（低於此值剔除）",
-                                 0.0, 0.5, 0.1, 0.05, key="fe_acf")
+                                 0.0, 0.5, 0.1, 0.05, key="eng_fe_acf")
 
-        if st.button("📉 執行統計篩選", key="run_stat_filter"):
+        if st.button("📉 執行統計篩選", key="eng_run_stat_filter"):
             snapshot_before = clean_df.copy()
             # BUG FIX: wrap in try/except and store ALL results in session_state
             # before any st.rerun() or widget rendering occurs
@@ -447,7 +447,7 @@ def _render_main(selected_process_df, show_mean: bool = True):
             st.warning("目前沒有可顯示的數值欄位。")
             return
 
-        search_q = st.text_input("🔍 欄位關鍵字篩選", key="fe_search",
+        search_q = st.text_input("🔍 欄位關鍵字篩選", key="eng_fe_search",
                                   placeholder="留空顯示全部...")
         display_cols = (
             [c for c in non_batch_num if search_q.lower() in c.lower()]
@@ -491,13 +491,13 @@ def _render_main(selected_process_df, show_mean: bool = True):
 
                     was_touched = col in all_added or col in all_removed_from_base
                     if was_touched:
-                        if st.button("↩️ 反悔", key=f"undo_ov_{safe_key}",
+                        if st.button("↩️ 反悔", key=f"eng_undo_ov_{safe_key}",
                                      help=f"還原此欄位的最近一次操作",
                                      type="secondary"):
                             _undo_col(col)
                             st.rerun()
 
-                    if st.button("🗑️ 刪除", key=f"manual_drop_{safe_key}",
+                    if st.button("🗑️ 刪除", key=f"eng_manual_drop_{safe_key}",
                                  help=f"手動刪除此欄位",
                                  type="secondary"):
                         snapshot_before = clean_df.copy()
