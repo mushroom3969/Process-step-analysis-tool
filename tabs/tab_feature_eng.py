@@ -342,6 +342,103 @@ def _render_main(selected_process_df, show_mean: bool = True):
             section_title="Step1_auto_clean", show_mean=show_mean,
         )
 
+    # ══════════════════════════════════════════════════════════════════════════════
+    # ── 區塊 B：統計篩選 (修正版) ────────────────────────────────────────────────
+    # ══════════════════════════════════════════════════════════════════════════════
+    if st.session_state.get("clean_df") is not None:
+        # 這裡的 clean_df 僅用於顯示 UI 上的 Slider 預覽
+        current_df = st.session_state["clean_df"]
+    
+        st.markdown("---")
+        st.markdown("### 📉 Step 2：統計篩選（移除低資訊量欄位）")
+        st.caption("篩選條件：CV 過低（接近常數）、Jump Ratio 過高（雜訊）、ACF 過低（無自相關）。")
+    
+        c1, c2, c3 = st.columns(3)
+        cv_thresh   = c1.slider("CV 門檻（低於此值剔除）", 0.0, 0.1, 0.01, 0.001, format="%.3f", key="fe_cv")
+        jump_thresh = c2.slider("Jump Ratio 門檻（高於此值剔除）", 0.1, 1.0, 0.5, 0.05, key="fe_jump")
+        acf_thresh  = c3.slider("ACF 門檻（低於此值剔除）", 0.0, 0.5, 0.1, 0.05, key="fe_acf")
+    
+        # 核心修正：按下按鈕後的邏輯
+        if st.button("📉 執行統計篩選", key="run_stat_filter", type="primary"):
+            # 1. 確保數據源：永遠從 Step 1 結束後的完整狀態開始篩選
+            # 如果沒有 df_before_step2，就拿當前的 clean_df 當作基準並備份
+            if "df_before_step2" not in st.session_state:
+                st.session_state["df_before_step2"] = st.session_state["clean_df"].copy()
+            
+            source_df = st.session_state["df_before_step2"]
+            snapshot_before = source_df.copy()
+    
+            try:
+                with st.spinner("篩選計算中..."):
+                    # 2. 執行篩選函數
+                    filtered_df, dropped_info = filter_columns_by_stats(
+                        source_df,
+                        cv_threshold=cv_thresh,
+                        jump_ratio_threshold=jump_thresh,
+                        acf_threshold=acf_thresh,
+                    )
+    
+                    # 3. 安全處理 BatchID（避免重複插入報錯）
+                    if "BatchID" in source_df.columns and "BatchID" not in filtered_df.columns:
+                        filtered_df.insert(0, "BatchID", source_df["BatchID"])
+    
+                    # 4. 計算變更欄位清單
+                    cols_before = set(source_df.columns)
+                    cols_after  = set(filtered_df.columns)
+                    removed = sorted(list(cols_before - cols_after))
+                    added   = sorted(list(cols_after - cols_before)) # 統計篩選通常不會新增，但保留邏輯一致性
+    
+                    # 5. 更新 Session State
+                    st.session_state["clean_df"] = filtered_df
+                    st.session_state["fe_stat_result"] = {
+                        "filtered_df": filtered_df,
+                        "removed": removed,
+                        "added": added,
+                        "dropped_info": dropped_info,
+                        "snapshot": snapshot_before,
+                    }
+    
+                    # 6. 紀錄到歷史 log
+                    _push_op("stat_filter", removed, added, snapshot_before, reason_map=dropped_info)
+                    
+                    st.toast("統計篩選完成！", icon="📉")
+                    # 7. 強制刷新頁面，確保下方顯示區域立即讀取新結果
+                    st.rerun()
+    
+            except Exception as e:
+                st.error(f"統計篩選失敗：{e}")
+                st.exception(e)
+    
+        # ── 顯示結果區域 (從 Session State 讀取，確保 rerun 後不會消失) ──────────────
+        stat_res = st.session_state.get("fe_stat_result")
+        if stat_res is not None:
+            # 使用 .get() 確保 key 不存在時不會 crash
+            res_removed      = stat_res.get("removed", [])
+            res_added        = stat_res.get("added", [])
+            res_dropped_info = stat_res.get("dropped_info", {})
+            res_snapshot     = stat_res.get("snapshot")
+            res_filtered_df  = stat_res.get("filtered_df")
+    
+            st.success(f"✅ 剔除 {len(res_removed)} 個欄位 → 剩餘 {res_filtered_df.shape[1]} 欄")
+    
+            if res_dropped_info:
+                reason_df = pd.DataFrame(
+                    [(k, v) for k, v in res_dropped_info.items()],
+                    columns=["Column", "Reason"],
+                )
+                with st.expander("📋 查看被剔除欄位的具體指標", expanded=False):
+                    st.dataframe(reason_df, use_container_width=True, hide_index=True)
+    
+            # 渲染縮圖預覽
+            _render_changed_cols(
+                df_before=res_snapshot,
+                df_after=res_filtered_df,
+                cols_removed=res_removed,
+                cols_added=res_added,
+                source_df_for_removed=res_snapshot,
+                section_title="📋 統計篩選變更詳情",
+                show_mean=show_mean,
+            )
     
 # ══════════════════════════════════════════════════════════════════════════
     # ── 區塊 C：當前特徵總覽（個別管理與反悔） ────────────────────────────────
