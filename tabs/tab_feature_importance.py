@@ -142,9 +142,14 @@ def _render_changed_cols(df_before, df_after, cols_removed, cols_added,
         st.info("本次操作無欄位變更。")
         return
 
-    # Use a stable section hash so keys from different call-sites never collide
     import hashlib as _hl
-    section_hash = _hl.md5(section_title.encode()).hexdigest()[:6]
+    # section_hash 確保不同呼叫點之間不衝突
+    section_hash = _hl.md5(section_title.encode()).hexdigest()[:8]
+
+    def _make_key(prefix, col, i):
+        # 用完整欄位名稱做 hash，避免截斷後碰撞
+        col_hash = _hl.md5(col.encode()).hexdigest()[:8]
+        return f"{prefix}_{section_hash}_{i}_{col_hash}"
 
     st.markdown(f"#### {section_title}")
     st.caption(
@@ -155,9 +160,6 @@ def _render_changed_cols(df_before, df_after, cols_removed, cols_added,
     if cols_removed:
         st.markdown("##### 🗑️ 被刪除的欄位")
         for i, col in enumerate(cols_removed):
-            # Include section_hash + index so keys are globally unique
-            safe_key = col.replace(" ", "_").replace("(", "").replace(")", "")[:30]
-            uniq_key = f"{section_hash}_{i}_{safe_key}"
             with st.expander(f"🗑️  **{col[:70]}**", expanded=False):
                 c_left, c_right = st.columns([5, 1])
                 with c_left:
@@ -175,7 +177,7 @@ def _render_changed_cols(df_before, df_after, cols_removed, cols_added,
                         st.caption("（欄位已不存在，無法繪圖）")
                 with c_right:
                     st.markdown("<br><br>", unsafe_allow_html=True)
-                    if st.button("↩️ 反悔", key=f"undo_rm_{uniq_key}",
+                    if st.button("↩️ 反悔", key=_make_key("undo_rm", col, i),
                                  help=f"還原欄位：{col}", type="secondary"):
                         _undo_col(col)
                         st.rerun()
@@ -183,8 +185,6 @@ def _render_changed_cols(df_before, df_after, cols_removed, cols_added,
     if cols_added:
         st.markdown("##### ➕ 新增的欄位")
         for i, col in enumerate(cols_added):
-            safe_key = col.replace(" ", "_").replace("(", "").replace(")", "")[:30]
-            uniq_key = f"{section_hash}_{i}_{safe_key}"
             with st.expander(f"➕  **{col[:70]}**", expanded=False):
                 c_left, c_right = st.columns([5, 1])
                 with c_left:
@@ -203,7 +203,7 @@ def _render_changed_cols(df_before, df_after, cols_removed, cols_added,
                         st.caption("（欄位已不存在）")
                 with c_right:
                     st.markdown("<br><br>", unsafe_allow_html=True)
-                    if st.button("↩️ 反悔", key=f"undo_add_{uniq_key}",
+                    if st.button("↩️ 反悔", key=_make_key("undo_add", col, i),
                                  help=f"移除新增欄位：{col}", type="secondary"):
                         _undo_col(col)
                         st.rerun()
@@ -469,9 +469,10 @@ def _render_main(selected_process_df, show_mean: bool = True):
             all_removed_from_base.update(entry.get("cols_removed", []))
 
         for ov_i, col in enumerate(display_cols):
+            import hashlib as _hl
+            col_hash = _hl.md5(col.encode()).hexdigest()[:8]
             badge = " `🆕 新增`" if col in all_added else ""
-            safe_key = col.replace(" ", "_").replace("(", "").replace(")", "")[:30]
-            uniq_key = f"ov_{ov_i}_{safe_key}"
+            uniq_key = f"ov_{col_hash}"
             with st.expander(f"**{col[:75]}**{badge}", expanded=False):
                 exp_l, exp_r = st.columns([5, 1])
 
