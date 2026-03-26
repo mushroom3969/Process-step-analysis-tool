@@ -484,7 +484,53 @@ def _render_correlation_heatmap(X_fi, top_n_fi):
         plt.close()
         st.info("💡 **提示：** 此為線性相關性。更複雜的非線性交互作用請移步「🔮 SHAP 分析」分頁下的 Dependence Plot 觀察。")
 
+def _render_interaction_ranking(X_fi, top_n_fi):
+    """
+    計算並顯示潛在交互作用排名
+    """
+    st.markdown("#### 🔄 潛在交互作用排名 (Top Pairs)")
+    st.caption("評分 = |相關係數| × (特徵 A 重要性 + 特徵 B 重要性)。得分越高，代表這兩個參數越值得去 Dependence Plot 觀察。")
+    
+    fi_df = st.session_state.get("fi_perm_df")
+    if fi_df is None:
+        st.warning("請先在「RF 重要性」分頁訓練模型以取得特徵權重。")
+        return
+    
+    # 1. 取得 Top 特徵與其重要性分數
+    top_feats = fi_df.head(top_n_fi)
+    feat_list = top_feats["Feature"].tolist()
+    importance_map = dict(zip(top_feats["Feature"], top_feats["Perm_Importance"]))
+    
+    # 2. 計算兩兩組合的評分
+    corr_matrix = X_fi[feat_list].corr().abs()
+    pairs = []
+    for i in range(len(feat_list)):
+        for j in range(i + 1, len(feat_list)):
+            f1, f2 = feat_list[i], feat_list[j]
+            # 取得相關係數（避免 NaN）
+            c_val = corr_matrix.loc[f1, f2]
+            if np.isnan(c_val): c_val = 0
+            
+            # 計算綜合評分
+            score = c_val * (importance_map[f1] + importance_map[f2])
+            pairs.append({
+                "特徵組合": f"{f1} ↔ {f2}",
+                "綜合推薦得分": score,
+                "相關性(Abs)": c_val
+            })
+    
+    if not pairs:
+        st.write("數據不足以計算排名。")
+        return
 
+    # 3. 轉為 DataFrame 並顯示前 10 名
+    rank_df = pd.DataFrame(pairs).sort_values("綜合推薦得分", ascending=False).head(10)
+    
+    st.table(rank_df.style.format({
+        "綜合推薦得分": "{:.4f}",
+        "相關性(Abs)": "{:.2f}"
+    }))
+    
 # ═══════════════════════════════════════════════════════════
 #  Main render
 # ═══════════════════════════════════════════════════════════
@@ -536,3 +582,6 @@ def render(selected_process_df):
     # 🔄 [新功能] — 渲染交互作用分頁的熱點圖
     with fi_subtabs[4]:
         _render_correlation_heatmap(X_fi, top_n_fi)
+        # --- 加上下面這一行 ---
+        st.divider() # 加一條分割線
+        _render_interaction_ranking(X_fi, top_n_fi)
