@@ -369,45 +369,41 @@ def _render_main(selected_process_df, show_mean: bool = True):
         acf_thresh  = c3.slider("ACF 門檻（低於此值剔除）",
                                  0.0, 0.5, 0.1, 0.05, key="fe_acf")
 
+        source_df = st.session_state.get("df_before_stats", st.session_state["clean_df"])
+        
         if st.button("📉 執行統計篩選", key="run_stat_filter"):
-            snapshot_before = clean_df.copy()
-            # BUG FIX: wrap in try/except and store ALL results in session_state
-            # before any st.rerun() or widget rendering occurs
             try:
                 with st.spinner("篩選中..."):
+                    # 1. 備份原始狀態（若尚未備份）
+                    if "df_before_stats" not in st.session_state:
+                        st.session_state["df_before_stats"] = source_df.copy()
+                    
+                    # 2. 執行篩選
                     filtered_df, dropped_info = filter_columns_by_stats(
-                        clean_df,
+                        st.session_state["df_before_stats"], # 永遠用乾淨的來源跑
                         cv_threshold=cv_thresh,
                         jump_ratio_threshold=jump_thresh,
                         acf_threshold=acf_thresh,
                     )
-                    # Always keep BatchID
-                    if "BatchID" in clean_df.columns and "BatchID" not in filtered_df.columns:
-                        filtered_df.insert(0, "BatchID", clean_df["BatchID"])
-
-                cols_before = set(clean_df.columns)
-                cols_after  = set(filtered_df.columns)
-                removed = sorted(cols_before - cols_after)
-                added   = sorted(cols_after  - cols_before)
-
-                st.session_state["fe_stat_result"] = {
-                    "filtered_df":  filtered_df,
-                    "removed":      removed,
-                    "added":        added,
-                    "dropped_info": dropped_info,
-                    "snapshot":     snapshot_before,
-                }
-
-                st.session_state["fe_auto_result"]  = None   # 清掉 Step1
-                st.session_state["clean_df"]        = filtered_df
-                st.session_state["fe_stat_dropped"] = dropped_info
-                _push_op("stat_filter", removed, added, snapshot_before,
-                         reason_map=dropped_info)
-
+        
+                    # 3. 確保 BatchID 存在 (更安全的寫法)
+                    if "BatchID" in st.session_state["df_before_stats"].columns:
+                        if "BatchID" not in filtered_df.columns:
+                            filtered_df.insert(0, "BatchID", st.session_state["df_before_stats"]["BatchID"])
+        
+                    # 4. 更新狀態
+                    st.session_state["clean_df"] = filtered_df
+                    st.session_state["fe_stat_result"] = {
+                        "removed": sorted(set(st.session_state["df_before_stats"].columns) - set(filtered_df.columns)),
+                        "dropped_info": dropped_info
+                    }
+                    
+                    # 5. 紀錄操作並強制刷新
+                    _push_op("stat_filter", ...) 
+                    st.rerun() 
+        
             except Exception as e:
-                import traceback
                 st.error(f"統計篩選失敗：{e}")
-                st.code(traceback.format_exc())
 
         # Display results from session_state (stable across reruns)
         stat_res = st.session_state.get("fe_stat_result")
