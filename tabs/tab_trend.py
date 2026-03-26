@@ -505,10 +505,13 @@ def render(selected_process_df):
 
         # ── X / Y / 圖表類型 ──────────────────────────────────
         c1, c2, c3 = st.columns(3)
-        feat_x    = c1.selectbox("X 軸特徵", numeric_cols, key="cz_feat_x")
-        feat_y    = c2.selectbox("Y 軸特徵",
-                                  [c for c in numeric_cols if c != feat_x],
-                                  key="cz_feat_y")
+        # 修改點：使用 plot_options 替代 numeric_cols
+        feat_x = c1.selectbox("X 軸特徵", plot_options, index=0, key="cz_feat_x") # 預設選 index
+        
+        # 修改點：Y 軸排除掉目前選中的 feat_x
+        y_options = [c for c in plot_options if c != feat_x]
+        feat_y = c2.selectbox("Y 軸特徵", y_options, index=0, key="cz_feat_y")
+        
         plot_type = c3.selectbox(
             "圖表類型", ["scatter", "scatter+line", "dual_line"],
             key="cz_plot_type",
@@ -525,7 +528,7 @@ def render(selected_process_df):
 
         # ── Hue 設定 UI ───────────────────────────────────────
         st.markdown("---")
-        hue_cfg = _hue_ui(numeric_cols, feat_x, feat_y, key_prefix="cz")
+        hue_cfg = _hue_ui(plot_options, feat_x, feat_y, key_prefix="cz")
 
         # ── Zone 設定（zone 模式才顯示）────────────────────────
         zones = _zone_ui(hue_cfg, numeric_cols, work_df, key_prefix="cz")
@@ -595,19 +598,30 @@ def render(selected_process_df):
         if hue_cfg["hue_mode"] == "zone" and zones:
             if st.checkbox("顯示各批次所在區間", key="cz_show_table"):
                 ref_feat = hue_cfg.get("hue_feat") or feat_x
+                
                 def _assign(val):
                     for z in zones:
                         if pd.notna(val) and z["min"] <= val <= z["max"]:
                             return z["label"]
                     return "Outside"
-                cols_needed = (["BatchID", ref_feat, feat_x, feat_y]
-                               if "BatchID" in work_df.columns
-                               else [ref_feat, feat_x, feat_y])
-                cols_needed = list(dict.fromkeys(
-                    c for c in cols_needed if c in work_df.columns
-                ))
-                summary = work_df[cols_needed].copy()
-                summary["Zone"] = work_df[ref_feat].apply(_assign)
+
+                # 建立顯示用的 DataFrame
+                summary = work_df.copy()
+                
+                # ─── 新增：如果參考特徵是 index，先把它轉成真正的欄位方便處理 ───
+                if ref_feat == "index":
+                    summary["index"] = summary.index.values.astype(float)
+                if feat_x == "index" and "index" not in summary.columns:
+                    summary["index"] = summary.index.values.astype(float)
+                if feat_y == "index" and "index" not in summary.columns:
+                    summary["index"] = summary.index.values.astype(float)
+
+                cols_needed = ["BatchID", ref_feat, feat_x, feat_y]
+                cols_needed = list(dict.fromkeys(c for c in cols_needed if c in summary.columns))
+                
+                summary = summary[cols_needed].copy()
+                summary["Zone"] = summary[ref_feat].apply(_assign)
+                
                 st.dataframe(
                     summary.sort_values(ref_feat).reset_index(drop=True),
                     width="stretch", hide_index=True,
