@@ -372,42 +372,42 @@ def _render_main(selected_process_df, show_mean: bool = True):
         source_df = st.session_state.get("df_before_stats", st.session_state["clean_df"])
         
         if st.button("📉 執行統計篩選", key="run_stat_filter"):
-        # 檢查 session_state 中是否有原始備份，避免重複篩選導致欄位越來越少
-        # 建議在 Step 1 結束時存一個 'df_before_step2'
-        source_df = st.session_state.get("df_before_step2", st.session_state["clean_df"])
+            # 檢查 session_state 中是否有原始備份，避免重複篩選導致欄位越來越少
+            # 建議在 Step 1 結束時存一個 'df_before_step2'
+            source_df = st.session_state.get("df_before_step2", st.session_state["clean_df"])
+            
+            if "df_before_step2" not in st.session_state:
+                st.session_state["df_before_step2"] = source_df.copy()
         
-        if "df_before_step2" not in st.session_state:
-            st.session_state["df_before_step2"] = source_df.copy()
-    
-        try:
-            with st.spinner("篩選中..."):
-                # 執行篩選函數
-                filtered_df, dropped_info = filter_columns_by_stats(
-                    st.session_state["df_before_step2"], 
-                    cv_threshold=cv_thresh,
-                    jump_ratio_threshold=jump_thresh,
-                    acf_threshold=acf_thresh,
-                )
-    
-                # 安全地插入 BatchID
-                if "BatchID" in st.session_state["df_before_step2"].columns:
-                    if "BatchID" not in filtered_df.columns:
-                        filtered_df.insert(0, "BatchID", st.session_state["df_before_step2"]["BatchID"])
-    
-                # 更新狀態
-                st.session_state["clean_df"] = filtered_df
-                st.session_state["fe_stat_result"] = {
-                    "filtered_df": filtered_df,
-                    "dropped_info": dropped_info,
-                    # ... 其他你要存的資訊
-                }
-                
-                # 重要：執行完畢後強制刷新頁面，讓結果立刻顯示
-                st.rerun()
-    
-        except Exception as e:
-            st.error(f"統計篩選失敗：{e}")
-            st.exception(e) # 顯示詳細報錯資訊以便偵錯
+            try:
+                with st.spinner("篩選中..."):
+                    # 執行篩選函數
+                    filtered_df, dropped_info = filter_columns_by_stats(
+                        st.session_state["df_before_step2"], 
+                        cv_threshold=cv_thresh,
+                        jump_ratio_threshold=jump_thresh,
+                        acf_threshold=acf_thresh,
+                    )
+        
+                    # 安全地插入 BatchID
+                    if "BatchID" in st.session_state["df_before_step2"].columns:
+                        if "BatchID" not in filtered_df.columns:
+                            filtered_df.insert(0, "BatchID", st.session_state["df_before_step2"]["BatchID"])
+        
+                    # 更新狀態
+                    st.session_state["clean_df"] = filtered_df
+                    st.session_state["fe_stat_result"] = {
+                        "filtered_df": filtered_df,
+                        "dropped_info": dropped_info,
+                        # ... 其他你要存的資訊
+                    }
+                    
+                    # 重要：執行完畢後強制刷新頁面，讓結果立刻顯示
+                    st.rerun()
+        
+            except Exception as e:
+                st.error(f"統計篩選失敗：{e}")
+                st.exception(e) # 顯示詳細報錯資訊以便偵錯
 
         # Display results from session_state (stable across reruns)
         stat_res = st.session_state.get("fe_stat_result")
