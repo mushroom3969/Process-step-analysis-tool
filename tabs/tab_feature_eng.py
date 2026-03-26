@@ -260,7 +260,26 @@ def _render_history_panel():
             st.toast("✅ 已完全重置", icon="🔄")
             st.rerun()
 
+def render(selected_process_df):  # <--- 報錯就是因為找不到這一行
+    _init_fe_state()
+    st.header("特徵工程 & 清理")
+    
+    if selected_process_df is None:
+        st.info("請先在側欄選擇製程步驟。")
+        return
+        
+    # 控制開關
+    show_mean = st.checkbox("📊 圖表顯示平均線與 ±1σ 色帶", value=True, key="fe_show_mean")
 
+    main_col, hist_col = st.columns([3, 1])
+
+    with hist_col:
+        st.markdown("### 📜 操作歷史")
+        _render_history_panel()
+
+    with main_col:
+        # 呼叫主要的渲染邏輯
+        _render_main(selected_process_df, show_mean)
 # ══════════════════════════════════════════════════════════════════════════════
 # ── 主 render ─────────────────────────────────────────────────────────────────
 # ══════════════════════════════════════════════════════════════════════════════
