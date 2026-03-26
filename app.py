@@ -17,15 +17,16 @@ import streamlit as st
 from utils import split_process_df
 
 # ── Tab imports ─────────────────────────────────────────────────────────────
-# 檔案名稱與內容不符。根據你的註解，這裡建立正確的別名對應：
-from tabs import tab_pca as tab_overview              # tab_pca.py → 資料總覽
-from tabs import tab_feature_eng as tab_cross_process # tab_feature_eng.py → 跨製程監控
-from tabs import tab_feature_importance as tab_feature_eng # tab_feature_importance.py → 特徵工程 & 清理
-from tabs import tab_overview as tab_missing          # tab_overview.py → 缺失值分析
-from tabs import tab_cross_process as tab_correlation  # tab_cross_process.py → 相關性分析
-from tabs import tab_stat_test as tab_pca             # tab_stat_test.py → PCA 分析
-from tabs import tab_trend as tab_stat_test           # tab_trend.py → 統計檢定
-from tabs import tab_missing as tab_literature        # tab_missing.py → 文獻佐證分析
+from tabs import tab_overview          # render(raw_df, dfs_dict, selected_process_df, selected_process)
+from tabs import tab_cross_process     # render(raw_df)
+from tabs import tab_feature_eng       # render(selected_process_df)
+from tabs import tab_feature_importance# render(selected_process_df)
+from tabs import tab_missing           # render(selected_process_df)
+from tabs import tab_correlation       # render(selected_process_df)
+from tabs import tab_pca               # render(selected_process_df)
+from tabs import tab_stat_test         # render(selected_process_df)
+from tabs import tab_trend             # render(selected_process_df)
+from tabs import tab_literature        # render()
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -244,33 +245,31 @@ tabs = st.tabs([
 ])
 
 with tabs[0]:
-    tab_cross_process.render(raw_df) # 實際呼叫 tab_feature_eng.py
+    tab_cross_process.render(raw_df)
 
 with tabs[1]:
-    tab_overview.render(raw_df, dfs_dict, selected_process_df, selected_process) # 實際呼叫 tab_pca.py
+    tab_overview.render(raw_df, dfs_dict, selected_process_df, selected_process)
 
 with tabs[2]:
-    # tab_trend.py 內容為統計檢定，故趨勢圖暫留 placeholder
-    st.info(" 趨勢圖分析功能即將上線。請確認 tab_trend.py 檔案內容是否正確。")
+    tab_trend.render(selected_process_df)
 
 with tabs[3]:
-    tab_feature_eng.render(selected_process_df) # 實際呼叫 tab_feature_importance.py
+    tab_feature_eng.render(selected_process_df)
 
 with tabs[4]:
-    tab_missing.render(selected_process_df) # 實際呼叫 tab_overview.py
+    tab_missing.render(selected_process_df)
 
 with tabs[5]:
-    tab_correlation.render(selected_process_df) # 實際呼叫 tab_cross_process.py
+    tab_correlation.render(selected_process_df)
 
 with tabs[6]:
-    tab_pca.render(selected_process_df) # 實際呼叫 tab_stat_test.py
+    tab_pca.render(selected_process_df)
 
 with tabs[7]:
-    # tab_correlation.py 目前為空
-    st.info(" 特徵重要性分析功能即將上線。")
+    tab_feature_importance.render(selected_process_df)
 
 with tabs[8]:
-    tab_stat_test.render(selected_process_df) # 實際呼叫 tab_trend.py
+    tab_stat_test.render(selected_process_df)
 
 with tabs[9]:
-    tab_literature.render() # 實際呼叫 tab_missing.py
+    tab_literature.render()
