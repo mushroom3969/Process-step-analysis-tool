@@ -33,12 +33,44 @@ def _sort_df(df, batch_col="BatchID"):
 
 
 def _apply_smooth(df, feat_x, feat_y, method, frac):
+    # 如果不平滑，直接回傳數值
     if method == "none":
-        return df[feat_x].values, df[feat_y].values
-    tmp = smooth_process_data(df[[feat_x, feat_y]], [feat_x, feat_y],
-                              id_cols=[], method=method, frac=frac)
-    return (tmp[feat_x].values if feat_x in tmp else df[feat_x].values,
-            tmp[feat_y].values if feat_y in tmp else df[feat_y].values)
+        # 這裡也要支援 index 取值
+        x = df.index.values.astype(float) if feat_x == "index" else df[feat_x].values
+        y = df.index.values.astype(float) if feat_y == "index" else df[feat_y].values
+        return x, y
+
+    # ── 處理 index 轉欄位的邏輯 ──────────────────────────
+    temp_df = df.copy()
+    actual_x = feat_x
+    actual_y = feat_y
+
+    # 如果 feat_x 是 index，建立暫時欄位
+    if feat_x == "index":
+        actual_x = "__index_temp__"
+        temp_df[actual_x] = temp_df.index.values.astype(float)
+    
+    # 如果 feat_y 是 index，建立暫時欄位
+    if feat_y == "index":
+        actual_y = "__index_temp__"
+        temp_df[actual_y] = temp_df.index.values.astype(float)
+
+    # ── 執行平滑化 ───────────────────────────────────
+    # 使用實際的欄位名稱 (actual_x, actual_y) 進行計算
+    tmp = smooth_process_data(
+        temp_df[[actual_x, actual_y]], 
+        [actual_x, actual_y],
+        id_cols=[], 
+        method=method, 
+        frac=frac
+    )
+
+    # ── 取得結果 ─────────────────────────────────────
+    # 從結果中取出平滑後的數值，若找不到則回傳原始值
+    res_x = tmp[actual_x].values if actual_x in tmp else temp_df[actual_x].values
+    res_y = tmp[actual_y].values if actual_y in tmp else temp_df[actual_y].values
+
+    return res_x, res_y
 
 
 def _pearson_stat(xs, ys):
