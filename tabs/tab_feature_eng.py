@@ -93,6 +93,7 @@ def _init_fe_state():
         # BUG FIX: store stat filter results separately so rerun doesn't re-trigger
         "fe_stat_result":    None,
         "fe_auto_result":    None,
+        "df_before_step2":   None,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -111,23 +112,34 @@ def _push_op(op_type: str, cols_removed: list, cols_added: list,
 
 
 def _undo_col(col: str):
-    log   = st.session_state["fe_op_log"]
-    cdf   = st.session_state["clean_df"]
+    log = st.session_state.get("fe_op_log", [])
+    cdf = st.session_state.get("clean_df")
 
     for entry in reversed(log):
         if col in entry["cols_removed"]:
-            snap = entry["snapshot"]
-            if col in snap.columns:
+            snap = entry.get("snapshot")
+            # Guard: both clean_df and snapshot must exist
+            if snap is None:
+                st.toast(f"⚠️ 找不到 {col} 的快照，無法還原", icon="⚠️")
+                return
+            if col not in snap.columns:
+                st.toast(f"⚠️ 快照中找不到欄位：{col}", icon="⚠️")
+                return
+            # Guard: clean_df must exist; if missing, restore from snapshot directly
+            if cdf is None:
+                cdf = snap[[c for c in snap.columns]].copy()
+            else:
                 cdf = cdf.copy()
                 cdf[col] = snap[col].values
-                st.session_state["clean_df"] = cdf
-                st.toast(f"✅ 已還原欄位：{col}", icon="↩️")
+            st.session_state["clean_df"] = cdf
+            st.toast(f"✅ 已還原欄位：{col}", icon="↩️")
             return
-        if col in entry["cols_added"]:
-            if col in cdf.columns:
+        if col in entry.get("cols_added", []):
+            if cdf is not None and col in cdf.columns:
                 cdf = cdf.drop(columns=[col])
                 st.session_state["clean_df"] = cdf
                 st.toast(f"✅ 已移除新增欄位：{col}", icon="↩️")
+            return
 
     st.toast(f"⚠️ 找不到 {col} 的操作記錄", icon="⚠️")
 
@@ -256,7 +268,8 @@ def _render_history_panel():
             st.session_state["fe_op_log"] = []
             st.session_state["fe_stat_dropped"] = {}
             st.session_state["fe_stat_result"] = None
-            st.session_state["fe_auto_result"]  = None
+            st.session_state["fe_auto_result"] = None
+            st.session_state["df_before_step2"] = None
             st.toast("✅ 已完全重置", icon="🔄")
             st.rerun()
 
