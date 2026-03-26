@@ -348,63 +348,63 @@ def _render_main(selected_process_df, show_mean: bool = True):
     # so that clicking the button stores results in session_state, and the
     # display always reads from session_state — never re-executes on rerun.
     # ══════════════════════════════════════════════════════════
-if st.session_state.get("clean_df") is not None:
-        st.markdown("---")
-        st.markdown("### 📉 Step 2：統計篩選（移除低資訊量欄位）")
-        
-        # 確保有 Step 2 的初始備份
-        if "df_before_step2" not in st.session_state:
-            st.session_state["df_before_step2"] = st.session_state["clean_df"].copy()
-
-        c1, c2, c3 = st.columns(3)
-        cv_thresh = c1.slider("CV 門檻", 0.0, 0.1, 0.01, 0.001, format="%.3f", key="fe_cv")
-        jump_thresh = c2.slider("Jump Ratio 門檻", 0.1, 1.0, 0.5, 0.05, key="fe_jump")
-        acf_thresh = c3.slider("ACF 門檻", 0.0, 0.5, 0.1, 0.05, key="fe_acf")
-
-        if st.button("📉 執行統計篩選", key="run_stat_filter"):
-            try:
-                with st.spinner("篩選中..."):
-                    # 永遠從 Step 2 的初始狀態開始篩選，避免重複點擊導致欄位歸零
-                    src = st.session_state["df_before_step2"]
-                    filtered_df, dropped_info = filter_columns_by_stats(
-                        src, 
-                        cv_threshold=cv_thresh,
-                        jump_ratio_threshold=jump_thresh,
-                        acf_threshold=acf_thresh,
-                    )
-
-                    # 處理 BatchID 遺失問題
-                    if "BatchID" in src.columns and "BatchID" not in filtered_df.columns:
-                        filtered_df.insert(0, "BatchID", src["BatchID"])
-
-                    # 更新 Session State
-                    st.session_state["clean_df"] = filtered_df
-                    
-                    # 紀錄到 Log 以便反悔
-                    removed = sorted(set(src.columns) - set(filtered_df.columns))
-                    _push_op("stat_filter", removed, [], src, reason_map=dropped_info)
-                    
-                    # 存儲結果供顯示
-                    st.session_state["fe_stat_result"] = {
-                        "removed": removed,
-                        "added": [],
-                        "dropped_info": dropped_info,
-                        "snapshot": src.copy(),
-                        "filtered_df": filtered_df
-                    }
-                    st.rerun()
-            except Exception as e:
-                st.error(f"統計篩選失敗：{e}")
-
-            _render_changed_cols(
-                df_before=snapshot_bef,
-                df_after=filtered_df,
-                cols_removed=removed,
-                cols_added=added,
-                source_df_for_removed=snapshot_bef,
-                section_title="📋 本次統計篩選變更欄位",
-                show_mean=show_mean,
-            )
+    if st.session_state.get("clean_df") is not None:
+            st.markdown("---")
+            st.markdown("### 📉 Step 2：統計篩選（移除低資訊量欄位）")
+            
+            # 確保有 Step 2 的初始備份
+            if "df_before_step2" not in st.session_state:
+                st.session_state["df_before_step2"] = st.session_state["clean_df"].copy()
+    
+            c1, c2, c3 = st.columns(3)
+            cv_thresh = c1.slider("CV 門檻", 0.0, 0.1, 0.01, 0.001, format="%.3f", key="fe_cv")
+            jump_thresh = c2.slider("Jump Ratio 門檻", 0.1, 1.0, 0.5, 0.05, key="fe_jump")
+            acf_thresh = c3.slider("ACF 門檻", 0.0, 0.5, 0.1, 0.05, key="fe_acf")
+    
+            if st.button("📉 執行統計篩選", key="run_stat_filter"):
+                try:
+                    with st.spinner("篩選中..."):
+                        # 永遠從 Step 2 的初始狀態開始篩選，避免重複點擊導致欄位歸零
+                        src = st.session_state["df_before_step2"]
+                        filtered_df, dropped_info = filter_columns_by_stats(
+                            src, 
+                            cv_threshold=cv_thresh,
+                            jump_ratio_threshold=jump_thresh,
+                            acf_threshold=acf_thresh,
+                        )
+    
+                        # 處理 BatchID 遺失問題
+                        if "BatchID" in src.columns and "BatchID" not in filtered_df.columns:
+                            filtered_df.insert(0, "BatchID", src["BatchID"])
+    
+                        # 更新 Session State
+                        st.session_state["clean_df"] = filtered_df
+                        
+                        # 紀錄到 Log 以便反悔
+                        removed = sorted(set(src.columns) - set(filtered_df.columns))
+                        _push_op("stat_filter", removed, [], src, reason_map=dropped_info)
+                        
+                        # 存儲結果供顯示
+                        st.session_state["fe_stat_result"] = {
+                            "removed": removed,
+                            "added": [],
+                            "dropped_info": dropped_info,
+                            "snapshot": src.copy(),
+                            "filtered_df": filtered_df
+                        }
+                        st.rerun()
+                except Exception as e:
+                    st.error(f"統計篩選失敗：{e}")
+    
+                _render_changed_cols(
+                    df_before=snapshot_bef,
+                    df_after=filtered_df,
+                    cols_removed=removed,
+                    cols_added=added,
+                    source_df_for_removed=snapshot_bef,
+                    section_title="📋 本次統計篩選變更欄位",
+                    show_mean=show_mean,
+                )
 
     # ══════════════════════════════════════════════════════════
     # ── 區塊 C：當前特徵總覽（可個別反悔）────────────────────
