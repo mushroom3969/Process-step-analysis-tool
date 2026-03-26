@@ -1,522 +1,462 @@
-"""Tab — 特徵工程 & 清理（含逐欄預覽 + 反悔功能）"""
+"""Tab 6 — 特徵重要性（RF + Lasso + SHAP + PLS-VIP + 係數解釋）"""
 import sys, os as _os
 _dir = _os.path.dirname(_os.path.abspath(__file__))
 _root = _os.path.dirname(_dir)
 for _p in [_dir, _root, _os.getcwd()]:
     if _p not in sys.path:
         sys.path.insert(0, _p)
-
+        
 import math
 import textwrap
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 import streamlit as st
 
-from utils import (
-    clean_process_features_with_log,
-    filter_columns_by_stats,
-    extract_number,
-)
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.inspection import permutation_importance
+from sklearn.linear_model import Lasso, LassoCV
+from sklearn.preprocessing import StandardScaler
+from sklearn.cross_decomposition import PLSRegression
+from sklearn.model_selection import cross_val_predict
+from sklearn.metrics import mean_squared_error, r2_score
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# ── 趨勢迷你圖 ────────────────────────────────────────────────────────────────
-# ══════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════
+#  Helpers
+# ═══════════════════════════════════════════════════════════
 
-def _mini_trend(df: pd.DataFrame, col: str, color: str = "#2e86ab",
-                title_prefix: str = "", height: float = 2.8,
-                show_mean: bool = True) -> plt.Figure:
-    """
-    單欄 batch 時序折線圖，含平均線與 ±1σ 色帶。
-    X 軸依 BatchID 數字排序（若有）。
-    show_mean: 是否顯示平均線與 ±1σ 色帶。
-    """
-    plot_df = df.copy()
-    if "BatchID" in plot_df.columns:
-        plot_df["_sort"] = plot_df["BatchID"].apply(extract_number)
-        plot_df = plot_df.sort_values("_sort").reset_index(drop=True)
-    plot_df["_seq"] = range(1, len(plot_df) + 1)
-
-    vals = plot_df[col].values.astype(float)
-    seq  = plot_df["_seq"].values
-
-    fig, ax = plt.subplots(figsize=(10, height))
-    sns.set_style("whitegrid")
-
-    mu    = np.nanmean(vals)
-    sigma = np.nanstd(vals, ddof=1)
-
-    if show_mean:
-        # ±1σ 色帶
-        ax.fill_between(seq, mu - sigma, mu + sigma,
-                        alpha=0.12, color=color, zorder=0, label="±1σ")
-        # 平均線
-        ax.axhline(mu, color=color, linewidth=1.2, linestyle="--",
-                   alpha=0.75, label=f"Mean: {mu:.4f}", zorder=1)
-
-    # 折線 + 散點
-    ax.plot(seq, vals, color=color, linewidth=1.5, zorder=2)
-    ax.scatter(seq, vals, color=color, s=25, zorder=3,
-               edgecolors="white", linewidths=0.4)
-
-    # X 軸標籤
-    if "BatchID" in plot_df.columns and len(plot_df) <= 80:
-        ax.set_xticks(seq)
-        ax.set_xticklabels([str(b)[-6:] for b in plot_df["BatchID"]],
-                           rotation=90, fontsize=6)
-    else:
-        ax.set_xlabel("Batch Sequence", fontsize=8)
-
-    title = f"{title_prefix}{col[:60]}"
-    ax.set_title("\n".join(textwrap.wrap(title, width=72)), fontsize=8.5, pad=5)
-    ax.set_ylabel("Value", fontsize=8)
-    if show_mean:
-        ax.legend(fontsize=7, loc="upper right", framealpha=0.7)
-    ax.grid(axis="y", linestyle="--", alpha=0.35)
-    plt.tight_layout()
-    return fig
+def _wrap_tick_labels(ax, tick_getter, reverse_map, width=40, fontsize=8):
+    ax.set_yticklabels(
+        ["\n".join(textwrap.wrap(reverse_map.get(t.get_text(), t.get_text()), width))
+         for t in tick_getter()],
+        fontsize=fontsize)
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# ── Session-state 工具 ────────────────────────────────────────────────────────
-# ══════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════
+#  RF Tab
+# ═══════════════════════════════════════════════════════════
 
-def _init_fe_state():
-    """確保所有特徵工程相關 session_state 鍵都已初始化。"""
-    defaults = {
-        "fe_base_df":        None,
-        "clean_df":          None,
-        "fe_op_log":         [],
-        "fe_stat_dropped":   {},
-        # BUG FIX: store stat filter results separately so rerun doesn't re-trigger
-        "fe_stat_result":    None,
-        "fe_auto_result":    None,
-    }
-    for k, v in defaults.items():
-        if k not in st.session_state:
-            st.session_state[k] = v
+def _render_rf_tab(fi_subtab, X_fi, y_fi, top_n_fi):
+    with fi_subtab:
+        st.markdown("#### Random Forest — 調整 Hyperparameter")
 
+        with st.expander("⚙️ RF Hyperparameter 設定", expanded=False):
+            r1, r2, r3, r4 = st.columns(4)
+            n_est     = r1.slider("n_estimators",   50, 500, 200, 50, key="rf_n_est")
+            max_dep   = r2.slider("max_depth",        2,  20,   5,  1, key="rf_max_dep")
+            min_leaf  = r3.slider("min_samples_leaf", 1,  20,   4,  1, key="rf_min_leaf")
+            n_rep     = r4.slider("n_repeats (perm)", 5,  30,  15,  5, key="rf_n_rep")
 
-def _push_op(op_type: str, cols_removed: list, cols_added: list,
-             snapshot_before: pd.DataFrame, reason_map: dict = None):
-    st.session_state["fe_op_log"].append({
-        "op_type":       op_type,
-        "cols_removed":  cols_removed,
-        "cols_added":    cols_added,
-        "reason_map":    reason_map or {},
-        "snapshot":      snapshot_before.copy(),
-    })
+        if st.button("🌲 訓練 Random Forest", key="run_rf"):
+            with st.spinner("RF 訓練中..."):
+                rf = RandomForestRegressor(
+                    n_estimators=n_est, max_features="sqrt",
+                    max_depth=max_dep, min_samples_leaf=min_leaf, random_state=42)
+                rf.fit(X_fi, y_fi)
+                perm = permutation_importance(rf, X_fi, y_fi,
+                                              n_repeats=n_rep, random_state=42)
+                perm_df = pd.DataFrame({
+                    "Feature": X_fi.columns,
+                    "Perm_Importance": perm.importances_mean,
+                    "Std": perm.importances_std,
+                }).sort_values("Perm_Importance", ascending=False).reset_index(drop=True)
+                r2 = r2_score(y_fi, rf.predict(X_fi))
+                st.session_state.update({"fi_rf": rf, "fi_perm_df": perm_df, "fi_r2": r2,
+                                          "shap_vals": None})
+            st.success(f"✅ 完成！訓練 R² = {r2:.3f}")
 
-
-def _undo_col(col: str):
-    log   = st.session_state["fe_op_log"]
-    cdf   = st.session_state["clean_df"]
-
-    for entry in reversed(log):
-        if col in entry["cols_removed"]:
-            snap = entry["snapshot"]
-            if col in snap.columns:
-                cdf = cdf.copy()
-                cdf[col] = snap[col].values
-                st.session_state["clean_df"] = cdf
-                st.toast(f"✅ 已還原欄位：{col}", icon="↩️")
-            return
-        if col in entry["cols_added"]:
-            if col in cdf.columns:
-                cdf = cdf.drop(columns=[col])
-                st.session_state["clean_df"] = cdf
-                st.toast(f"✅ 已移除新增欄位：{col}", icon="↩️")
+        if st.session_state.get("fi_perm_df") is None:
             return
 
-    st.toast(f"⚠️ 找不到 {col} 的操作記錄", icon="⚠️")
+        perm_df = st.session_state["fi_perm_df"]
+        rf      = st.session_state["fi_rf"]
+        r2      = st.session_state.get("fi_r2", 0)
+
+        top_perm = perm_df.head(top_n_fi)
+        fig, ax  = plt.subplots(figsize=(10, max(5, top_n_fi * 0.45)))
+        colors   = ["#2e86ab" if v >= 0 else "#e84855" for v in top_perm["Perm_Importance"]]
+        ax.barh(top_perm["Feature"], top_perm["Perm_Importance"],
+                xerr=top_perm["Std"], color=colors, alpha=0.85,
+                error_kw={"ecolor": "gray", "capsize": 3})
+        ax.axvline(0, color="black", lw=1)
+        ax.set_title(f"RF Permutation Importance (Top {top_n_fi})", fontsize=13)
+        ax.set_xlabel("Mean Importance ± Std"); ax.invert_yaxis()
+        ax.grid(axis="x", linestyle="--", alpha=0.5)
+        plt.tight_layout(); st.pyplot(fig); plt.close()
+
+        c1, c2 = st.columns(2)
+        c1.metric("訓練集 R²", f"{r2:.3f}")
+        c2.metric("特徵數", X_fi.shape[1])
+        st.dataframe(perm_df.style.background_gradient(cmap="Blues", subset=["Perm_Importance"]),
+                     width="stretch", hide_index=True)
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# ── 欄位變更展示區 ────────────────────────────────────────────────────────────
-# ══════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════
+#  Lasso Tab (new)
+# ═══════════════════════════════════════════════════════════
 
-def _render_changed_cols(df_before, df_after, cols_removed, cols_added,
-                          source_df_for_removed, section_title, show_mean=True):
-    if not cols_removed and not cols_added:
-        st.info("本次操作無欄位變更。")
-        return
+def _render_lasso_tab(fi_subtab, X_fi, y_fi, top_n_fi):
+    with fi_subtab:
+        st.markdown("#### Lasso Regression — 係數重要性")
+        st.caption("Lasso 透過 L1 正則化自動將不重要特徵的係數壓縮為 0，達到特徵選擇效果。")
 
-    import hashlib as _hl
-    _sh = _hl.md5(section_title.encode()).hexdigest()[:10]
-    def _k(pfx, col, idx):
-        return f"fi_{pfx}_{_sh}_{idx}_" + _hl.md5(col.encode()).hexdigest()[:10]
+        with st.expander("⚙️ Lasso Hyperparameter 設定", expanded=False):
+            la1, la2 = st.columns(2)
+            use_cv = la1.checkbox("自動選擇 α（LassoCV）", value=True, key="lasso_use_cv")
+            alpha_manual = la2.number_input("手動 α（use_cv=False 時）",
+                                             min_value=1e-6, max_value=10.0,
+                                             value=0.01, format="%.4f", key="lasso_alpha")
+            la3, la4 = st.columns(2)
+            max_iter = la3.slider("max_iter", 500, 5000, 1000, 500, key="lasso_max_iter")
+            cv_folds = la4.slider("CV folds（LassoCV）", 3, 10, 5, key="lasso_cv")
 
-    st.markdown(f"#### {section_title}")
-    st.caption(
-        f"共 **{len(cols_removed)}** 個欄位被刪除／{len(cols_added)} 個欄位被新增。"
-        "　點擊「↩️ 反悔」可逐欄還原。"
-    )
+        if st.button("🔍 執行 Lasso", key="run_lasso"):
+            with st.spinner("Lasso 計算中..."):
+                scaler = StandardScaler()
+                X_scaled = scaler.fit_transform(X_fi)
 
-    if cols_removed:
-        st.markdown("##### 🗑️ 被刪除的欄位")
-        for i, col in enumerate(cols_removed):
-            with st.expander(f"🗑️  **{col[:70]}**", expanded=False):
-                c_left, c_right = st.columns([5, 1])
-                with c_left:
-                    if col in source_df_for_removed.columns:
-                        try:
-                            fig = _mini_trend(source_df_for_removed, col,
-                                              color="#e84855",
-                                              title_prefix="[刪除前] ",
-                                              show_mean=show_mean)
-                            st.pyplot(fig, use_container_width=True)
-                            plt.close()
-                        except Exception as e:
-                            st.caption(f"無法繪圖：{e}")
-                    else:
-                        st.caption("（欄位已不存在，無法繪圖）")
-                with c_right:
-                    st.markdown("<br><br>", unsafe_allow_html=True)
-                    if st.button("↩️ 反悔", key=_k("rm", col, i),
-                                 help=f"還原欄位：{col}", type="secondary"):
-                        _undo_col(col)
-                        st.rerun()
+                if use_cv:
+                    model = LassoCV(cv=cv_folds, max_iter=max_iter, random_state=42)
+                    model.fit(X_scaled, y_fi)
+                    best_alpha = model.alpha_
+                else:
+                    model = Lasso(alpha=alpha_manual, max_iter=max_iter, random_state=42)
+                    model.fit(X_scaled, y_fi)
+                    best_alpha = alpha_manual
 
-    if cols_added:
-        st.markdown("##### ➕ 新增的欄位")
-        for i, col in enumerate(cols_added):
-            with st.expander(f"➕  **{col[:70]}**", expanded=False):
-                c_left, c_right = st.columns([5, 1])
-                with c_left:
-                    cdf = st.session_state.get("clean_df")
-                    _src = cdf if cdf is not None and col in cdf.columns else df_after
-                    if col in _src.columns:
-                        try:
-                            fig = _mini_trend(_src, col, color="#2ca02c",
-                                              title_prefix="[新增] ",
-                                              show_mean=show_mean)
-                            st.pyplot(fig, use_container_width=True)
-                            plt.close()
-                        except Exception as e:
-                            st.caption(f"無法繪圖：{e}")
-                    else:
-                        st.caption("（欄位已不存在）")
-                with c_right:
-                    st.markdown("<br><br>", unsafe_allow_html=True)
-                    if st.button("↩️ 反悔", key=_k("add", col, i),
-                                 help=f"移除新增欄位：{col}", type="secondary"):
-                        _undo_col(col)
-                        st.rerun()
+                coef_df = pd.DataFrame({
+                    "Feature": X_fi.columns,
+                    "Coefficient": model.coef_,
+                    "Abs_Coef": np.abs(model.coef_),
+                }).sort_values("Abs_Coef", ascending=False).reset_index(drop=True)
 
+                r2_lasso = r2_score(y_fi, model.predict(X_scaled))
+                n_nonzero = (coef_df["Coefficient"] != 0).sum()
 
-# ══════════════════════════════════════════════════════════════════════════════
-# ── 操作歷史面板 ──────────────────────────────────────────────────────────────
-# ══════════════════════════════════════════════════════════════════════════════
+                st.session_state.update({
+                    "lasso_model": model, "lasso_coef_df": coef_df,
+                    "lasso_alpha": best_alpha, "lasso_r2": r2_lasso,
+                    "lasso_scaler": scaler, "lasso_n_nonzero": n_nonzero,
+                })
+            st.success(f"✅ 完成！α={best_alpha:.4f}，R²={r2_lasso:.3f}，非零係數：{n_nonzero}/{X_fi.shape[1]}")
 
-def _render_history_panel():
-    log = st.session_state.get("fe_op_log", [])
-    if not log:
-        st.caption("尚無操作記錄。")
-        return
+        if st.session_state.get("lasso_coef_df") is None:
+            return
 
-    for i, entry in enumerate(reversed(log)):
-        idx = len(log) - 1 - i
-        op_label = {
-            "auto_clean":   "🔧 自動特徵工程",
-            "stat_filter":  "📉 統計篩選",
-            "manual_drop":  "🗑️ 手動移除",
-        }.get(entry["op_type"], entry["op_type"])
-
-        n_rm = len(entry["cols_removed"])
-        n_add = len(entry["cols_added"])
-        label_parts = []
-        if n_rm:  label_parts.append(f"-{n_rm}")
-        if n_add: label_parts.append(f"+{n_add}")
-        badge = " | ".join(label_parts)
-
-        with st.expander(f"**#{idx+1}** {op_label}  `{badge}`", expanded=False):
-            if entry["cols_removed"]:
-                st.markdown("🗑️ " + "、".join(
-                    [c[:30] for c in entry["cols_removed"][:8]]
-                ) + ("..." if len(entry["cols_removed"]) > 8 else ""))
-            if entry["cols_added"]:
-                st.markdown("➕ " + "、".join(
-                    [c[:30] for c in entry["cols_added"][:8]]
-                ) + ("..." if len(entry["cols_added"]) > 8 else ""))
-
-            if st.button(f"↩️ 整批反悔此操作", key=f"undo_batch_{idx}",
-                         type="secondary"):
-                st.session_state["clean_df"] = entry["snapshot"].copy()
-                st.session_state["fe_op_log"] = st.session_state["fe_op_log"][:idx]
-                st.session_state["fe_stat_result"] = None
-                st.session_state["fe_auto_result"]  = None
-                st.toast(f"✅ 已整批還原操作 #{idx+1}", icon="↩️")
-                st.rerun()
-
-    if st.button("🔄 完全重置（回到特徵工程前）",
-                 key="fe_full_reset", type="secondary"):
-        base = st.session_state.get("fe_base_df")
-        if base is not None:
-            st.session_state["clean_df"] = base.copy()
-            st.session_state["fe_op_log"] = []
-            st.session_state["fe_stat_dropped"] = {}
-            st.session_state["fe_stat_result"] = None
-            st.session_state["fe_auto_result"]  = None
-            st.toast("✅ 已完全重置", icon="🔄")
-            st.rerun()
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# ── 主 render ─────────────────────────────────────────────────────────────────
-# ══════════════════════════════════════════════════════════════════════════════
-
-def render(selected_process_df):
-    _init_fe_state()
-
-    st.header("特徵工程 & 清理")
-    if selected_process_df is None:
-        st.info("請先在側欄選擇製程步驟。")
-        return
-
-    # 全域平均線顯示控制
-    show_mean = st.checkbox("📊 圖表顯示平均線與 ±1σ 色帶", value=True, key="fe_show_mean")
-
-    main_col, hist_col = st.columns([3, 1])
-
-    with hist_col:
-        st.markdown("### 📜 操作歷史")
-        _render_history_panel()
-
-    with main_col:
-        _render_main(selected_process_df, show_mean)
-
-
-def _render_main(selected_process_df, show_mean: bool = True):
-    """主操作區（左側 3/4）。"""
-
-    # ══════════════════════════════════════════════════════════
-    # ── 區塊 A：自動特徵工程 ──────────────────────────────────
-    # ══════════════════════════════════════════════════════════
-    st.markdown("### 🔧 Step 1：自動特徵工程")
-    st.markdown("""
-    **自動執行以下規則：**
-    - 🗑️ 過濾含有 `Verification Result` / `No (na)` 關鍵字的欄位
-    - ➕ 配對 Max/Min、After/Before、End/Start → 計算差值欄位
-    - 🔢 數字編號欄位（如 `_1`、`_2`）→ 取平均後合併
-    """)
-
-    if st.button("🔧 執行特徵工程", key="run_fe", type="primary"):
-        snapshot_before = selected_process_df.copy()
-        with st.spinner("處理中..."):
-            clean_df, drop_log = clean_process_features_with_log(
-                selected_process_df, id_col="BatchID"
-            )
-
-        cols_before = set(selected_process_df.columns)
-        cols_after  = set(clean_df.columns)
-        removed = sorted(cols_before - cols_after)
-        added   = sorted(cols_after  - cols_before)
-
-        st.session_state["fe_base_df"]      = snapshot_before
-        st.session_state["clean_df"]        = clean_df
-        st.session_state["fe_op_log"]       = []
-        st.session_state["fe_stat_result"]  = None
-        st.session_state["fe_auto_result"]  = {
-            "removed":  removed, "added": added,
-            "snap":     snapshot_before, "clean": clean_df,
-            "n_before": selected_process_df.shape[1],
-            "n_after":  clean_df.shape[1],
-        }
-        _push_op("auto_clean", removed, added, snapshot_before,
-                 reason_map={r["Column"]: r.get("Reason", "") for _, r in drop_log.iterrows()
-                              if "Column" in drop_log.columns})
-
-    # ── 顯示 Step1 結果（穩定，從 session_state 讀）──────────────────
-    _auto = st.session_state.get("fe_auto_result")
-    # 清除格式不符的舊版 session_state（key 名稱不同）
-    if _auto is not None and ("snap" not in _auto or "clean" not in _auto):
-        st.session_state["fe_auto_result"] = None
-        _auto = None
-    if _auto is not None:
-        st.success(
-            f"✅ 完成！從 {_auto['n_before']} 欄 → {_auto['n_after']} 欄"
-            f"（刪除 {len(_auto['removed'])} / 新增 {len(_auto['added'])}）"
-        )
-        _render_changed_cols(
-            df_before=_auto["snap"], df_after=_auto["clean"],
-            cols_removed=_auto["removed"], cols_added=_auto["added"],
-            source_df_for_removed=_auto["snap"],
-            section_title="Step1_auto_clean", show_mean=show_mean,
-        )
-
-    # ══════════════════════════════════════════════════════════
-    # ── 區塊 B：統計篩選 ──────────────────────────────────────
-    # BUG FIX: Separate the "run" button from the "display results" section
-    # so that clicking the button stores results in session_state, and the
-    # display always reads from session_state — never re-executes on rerun.
-    # ══════════════════════════════════════════════════════════
-    if st.session_state.get("clean_df") is not None:
-        clean_df = st.session_state["clean_df"]
-
-        st.markdown("---")
-        st.markdown("### 📉 Step 2：統計篩選（移除低資訊量欄位）")
-        st.caption("篩選條件：CV 過低（接近常數）、Jump Ratio 過高（雜訊）、ACF 過低（無自相關）。")
-
-        c1, c2, c3 = st.columns(3)
-        cv_thresh   = c1.slider("CV 門檻（低於此值剔除）",
-                                 0.0, 0.1, 0.01, 0.001, format="%.3f", key="fe_cv")
-        jump_thresh = c2.slider("Jump Ratio 門檻（高於此值剔除）",
-                                 0.1, 1.0, 0.5, 0.05, key="fe_jump")
-        # BUG FIX: changed default from 0.2 → 0.1 (0.2 was too aggressive,
-        # and was silently dropping almost all columns which caused the apparent "jump")
-        acf_thresh  = c3.slider("ACF 門檻（低於此值剔除）",
-                                 0.0, 0.5, 0.1, 0.05, key="fe_acf")
-
-        source_df = st.session_state.get("df_before_stats", st.session_state["clean_df"])
-        
-        if st.button("📉 執行統計篩選", key="run_stat_filter"):
-            # 檢查 session_state 中是否有原始備份，避免重複篩選導致欄位越來越少
-            # 建議在 Step 1 結束時存一個 'df_before_step2'
-            source_df = st.session_state.get("df_before_step2", st.session_state["clean_df"])
-            
-            if "df_before_step2" not in st.session_state:
-                st.session_state["df_before_step2"] = source_df.copy()
-        
-            try:
-                with st.spinner("篩選中..."):
-                    # 執行篩選函數
-                    filtered_df, dropped_info = filter_columns_by_stats(
-                        st.session_state["df_before_step2"], 
-                        cv_threshold=cv_thresh,
-                        jump_ratio_threshold=jump_thresh,
-                        acf_threshold=acf_thresh,
-                    )
-        
-                    # 安全地插入 BatchID
-                    if "BatchID" in st.session_state["df_before_step2"].columns:
-                        if "BatchID" not in filtered_df.columns:
-                            filtered_df.insert(0, "BatchID", st.session_state["df_before_step2"]["BatchID"])
-        
-                    # 更新狀態
-                    st.session_state["clean_df"] = filtered_df
-                    st.session_state["fe_stat_result"] = {
-                        "filtered_df": filtered_df,
-                        "dropped_info": dropped_info,
-                        # ... 其他你要存的資訊
-                    }
-                    
-                    # 重要：執行完畢後強制刷新頁面，讓結果立刻顯示
-                    st.rerun()
-        
-            except Exception as e:
-                st.error(f"統計篩選失敗：{e}")
-                st.exception(e) # 顯示詳細報錯資訊以便偵錯
-
-        # Display results from session_state (stable across reruns)
-        stat_res = st.session_state.get("fe_stat_result")
-        if stat_res is not None:
-            removed      = stat_res["removed"]
-            added        = stat_res["added"]
-            dropped_info = stat_res["dropped_info"]
-            snapshot_bef = stat_res["snapshot"]
-            filtered_df  = stat_res["filtered_df"]
-
-            st.success(f"✅ 剔除 {len(removed)} 個欄位 → 剩餘 {filtered_df.shape[1]} 欄")
-
-            if dropped_info:
-                reason_df = pd.DataFrame(
-                    [(k, v) for k, v in dropped_info.items()],
-                    columns=["Column", "Reason"],
-                )
-                with st.expander("📋 被剔除欄位原因", expanded=True):
-                    st.dataframe(reason_df, width="stretch", hide_index=True)
-
-            _render_changed_cols(
-                df_before=snapshot_bef,
-                df_after=filtered_df,
-                cols_removed=removed,
-                cols_added=added,
-                source_df_for_removed=snapshot_bef,
-                section_title="📋 本次統計篩選變更欄位",
-                show_mean=show_mean,
-            )
-
-    # ══════════════════════════════════════════════════════════
-    # ── 區塊 C：當前特徵總覽（可個別反悔）────────────────────
-    # ══════════════════════════════════════════════════════════
-    if st.session_state.get("clean_df") is not None:
-        clean_df = st.session_state["clean_df"]
-        op_log   = st.session_state.get("fe_op_log", [])
-
-        st.markdown("---")
-        st.markdown("### 📊 Step 3：當前特徵總覽 & 個別管理")
-
-        numeric_cols = clean_df.select_dtypes(include=["number"]).columns.tolist()
-        non_batch_num = [c for c in numeric_cols if c != "BatchID"]
+        coef_df   = st.session_state["lasso_coef_df"]
+        best_alpha= st.session_state["lasso_alpha"]
+        r2_lasso  = st.session_state["lasso_r2"]
+        n_nonzero = st.session_state["lasso_n_nonzero"]
 
         m1, m2, m3 = st.columns(3)
-        m1.metric("當前欄位數", clean_df.shape[1])
-        m2.metric("數值欄位數", len(non_batch_num))
-        m3.metric("批次數", clean_df.shape[0])
+        m1.metric("最佳 α", f"{best_alpha:.4f}")
+        m2.metric("R²", f"{r2_lasso:.3f}")
+        m3.metric("選出特徵數", f"{n_nonzero}")
 
-        if not non_batch_num:
-            st.warning("目前沒有可顯示的數值欄位。")
+        # Plot: all vs non-zero toggle
+        show_nonzero_only = st.checkbox("只顯示非零係數特徵", value=True, key="lasso_nonzero_only")
+        plot_df = coef_df[coef_df["Coefficient"] != 0] if show_nonzero_only else coef_df
+        top_plot = plot_df.head(top_n_fi)
+
+        if top_plot.empty:
+            st.warning("所有係數均為 0，嘗試降低 α 值。"); return
+
+        fig, ax = plt.subplots(figsize=(10, max(4, len(top_plot)*0.4)))
+        colors = ["#e84855" if v > 0 else "#2e86ab" for v in top_plot["Coefficient"]]
+        ax.barh(top_plot["Feature"], top_plot["Coefficient"], color=colors, alpha=0.85)
+        ax.axvline(0, color="black", lw=1)
+        ax.set_title(f"Lasso Coefficients (α={best_alpha:.4f}, Top {len(top_plot)})", fontsize=13)
+        ax.set_xlabel("Standardised Coefficient（正=增加Y，負=降低Y）")
+        ax.invert_yaxis(); ax.grid(axis="x", linestyle="--", alpha=0.5)
+        plt.tight_layout(); st.pyplot(fig); plt.close()
+
+        st.caption("係數已在標準化特徵上計算，數值可直接比較特徵相對影響力。")
+        st.dataframe(coef_df.style.background_gradient(cmap="RdBu_r", subset=["Coefficient"]),
+                     width="stretch", hide_index=True)
+
+
+# ═══════════════════════════════════════════════════════════
+#  SHAP Tab
+# ═══════════════════════════════════════════════════════════
+
+def _render_shap_tab(fi_subtab, X_fi, y_fi, top_n_fi):
+    with fi_subtab:
+        st.markdown("#### SHAP 分析")
+        shap_subtabs = st.tabs(["Beeswarm","Bar (全局)","Waterfall (單筆)","Dependence Plot"])
+
+        if st.button("🔮 計算 SHAP Values", key="run_shap"):
+            rf = st.session_state.get("fi_rf")
+            if rf is None:
+                st.error("請先在「RF 重要性」分頁訓練模型。"); return
+            try:
+                import shap as shap_lib
+                with st.spinner("計算 SHAP..."):
+                    explainer = shap_lib.TreeExplainer(rf)
+                    shap_vals = explainer.shap_values(X_fi)
+                st.session_state.update({"shap_vals": shap_vals,
+                                          "shap_explainer": explainer, "shap_lib": shap_lib})
+                st.success("✅ SHAP 完成！")
+            except Exception as e:
+                st.error(f"SHAP 失敗：{e}")
+
+        if st.session_state.get("shap_vals") is None:
             return
 
-        search_q = st.text_input("🔍 欄位關鍵字篩選", key="fe_search",
-                                  placeholder="留空顯示全部...")
-        display_cols = (
-            [c for c in non_batch_num if search_q.lower() in c.lower()]
-            if search_q.strip() else non_batch_num
-        )
-        st.caption(f"顯示 {len(display_cols)} / {len(non_batch_num)} 個欄位")
+        shap_vals = st.session_state["shap_vals"]
+        shap_lib  = st.session_state["shap_lib"]
+        explainer = st.session_state["shap_explainer"]
+        rf        = st.session_state["fi_rf"]
 
-        all_added = set()
-        for entry in op_log:
-            all_added.update(entry.get("cols_added", []))
-        all_removed_from_base = set()
-        for entry in op_log:
-            all_removed_from_base.update(entry.get("cols_removed", []))
+        short_map   = {c: f"F{i:02d}" for i, c in enumerate(X_fi.columns)}
+        reverse_map = {v: k for k, v in short_map.items()}
+        X_short     = X_fi.rename(columns=short_map)
+        shap_arr    = np.array(shap_vals)
 
-        import hashlib as _hl_ov
-        for col in display_cols:
-            _ch = _hl_ov.md5(col.encode()).hexdigest()[:12]
-            badge = " `🆕 新增`" if col in all_added else ""
-            with st.expander(f"**{col[:75]}**{badge}", expanded=False):
-                exp_l, exp_r = st.columns([5, 1])
+        def fix_labels(ax):
+            _wrap_tick_labels(ax, ax.get_yticklabels, reverse_map)
+            plt.subplots_adjust(left=0.38)
 
-                with exp_l:
-                    s = clean_df[col].dropna()
-                    stat_cols = st.columns(6)
-                    stat_cols[0].metric("n",       len(s))
-                    stat_cols[1].metric("Mean",    f"{s.mean():.4f}" if len(s) else "—")
-                    stat_cols[2].metric("Median",  f"{s.median():.4f}" if len(s) else "—")
-                    stat_cols[3].metric("SD",      f"{s.std(ddof=1):.4f}" if len(s) > 1 else "—")
-                    stat_cols[4].metric("Min",     f"{s.min():.4f}" if len(s) else "—")
-                    stat_cols[5].metric("Max",     f"{s.max():.4f}" if len(s) else "—")
+        with shap_subtabs[0]:
+            plt.figure(figsize=(11, max(6, top_n_fi*0.55)))
+            shap_lib.summary_plot(shap_arr, X_short, max_display=top_n_fi,
+                                  plot_type="dot", show=False)
+            fix_labels(plt.gca()); st.pyplot(plt.gcf()); plt.close()
 
-                    color = "#2ca02c" if col in all_added else "#2e86ab"
-                    try:
-                        fig = _mini_trend(clean_df, col, color=color, show_mean=show_mean)
-                        st.pyplot(fig, use_container_width=True)
-                        plt.close()
-                    except Exception as e:
-                        st.caption(f"繪圖失敗：{e}")
+        with shap_subtabs[1]:
+            plt.figure(figsize=(11, max(5, top_n_fi*0.55)))
+            shap_lib.summary_plot(shap_arr, X_short, max_display=top_n_fi,
+                                  plot_type="bar", show=False)
+            fix_labels(plt.gca()); st.pyplot(plt.gcf()); plt.close()
 
-                with exp_r:
-                    st.markdown("<br><br><br>", unsafe_allow_html=True)
+        with shap_subtabs[2]:
+            idx = st.slider("選擇樣本", 0, len(X_fi)-1, 0, key="shap_sample")
+            ev_raw = explainer.expected_value
+            base_val = float(ev_raw[0]) if hasattr(ev_raw, "__len__") else float(ev_raw)
+            expl_obj = shap_lib.Explanation(
+                values=shap_arr[idx], base_values=base_val,
+                data=X_fi.iloc[idx].values, feature_names=X_short.columns.tolist())
+            plt.figure(figsize=(12, max(6, top_n_fi*0.55)))
+            shap_lib.plots.waterfall(expl_obj, max_display=top_n_fi, show=False)
+            fix_labels(plt.gca()); st.pyplot(plt.gcf()); plt.close()
+            st.caption(f"樣本{idx}｜預測:{rf.predict(X_fi.iloc[[idx]])[0]:.3f}｜實際:{y_fi.iloc[idx]:.3f}｜基準:{base_val:.3f}")
 
-                    was_touched = col in all_added or col in all_removed_from_base
-                    if was_touched:
-                        if st.button("↩️ 反悔", key=f"fi_ov_undo_{_ch}",
-                                     help=f"還原此欄位的最近一次操作",
-                                     type="secondary"):
-                            _undo_col(col)
-                            st.rerun()
+        with shap_subtabs[3]:
+            dep_feat = st.selectbox("主特徵", X_fi.columns.tolist(), key="shap_dep_feat")
+            dep_int  = st.selectbox("交互著色", ["auto"]+X_fi.columns.tolist(), key="shap_dep_int")
+            fig, ax  = plt.subplots(figsize=(9, 5))
+            shap_lib.dependence_plot(short_map[dep_feat], shap_arr, X_short,
+                                     interaction_index=(None if dep_int=="auto" else short_map[dep_int]),
+                                     ax=ax, show=False)
+            ax.set_xlabel(dep_feat, fontsize=9); plt.tight_layout()
+            st.pyplot(fig); plt.close()
 
-                    if st.button("🗑️ 刪除", key=f"fi_ov_drop_{_ch}",
-                                 help=f"手動刪除此欄位",
-                                 type="secondary"):
-                        snapshot_before = clean_df.copy()
-                        new_clean = clean_df.drop(columns=[col])
-                        st.session_state["clean_df"] = new_clean
-                        _push_op("manual_drop", [col], [], snapshot_before)
-                        st.toast(f"🗑️ 已刪除：{col}", icon="🗑️")
-                        st.rerun()
+
+# ═══════════════════════════════════════════════════════════
+#  PLS-VIP Tab (enhanced with coefficients)
+# ═══════════════════════════════════════════════════════════
+
+def _render_pls_tab(fi_subtab, X_fi, y_fi, top_n_fi):
+    with fi_subtab:
+        st.markdown("#### PLS — VIP Score + 係數解釋")
+
+        max_comp = min(10, X_fi.shape[1], len(y_fi)-1)
+        if max_comp < 2:
+            st.warning("樣本數或特徵數不足。"); return
+
+        with st.expander("⚙️ PLS Hyperparameter 設定", expanded=False):
+            p1, p2 = st.columns(2)
+            cv_folds_pls = p1.slider("CV folds", 3, 10, 5, key="pls_cv_folds")
+            scale_pls    = p2.checkbox("標準化 X (推薦)", value=True, key="pls_scale")
+
+        st.markdown("**Step 1：CV 選最佳主成分數**")
+        if st.button("📉 計算 PLS CV MSE", key="run_pls_cv"):
+            with st.spinner("PLS CV..."):
+                X_arr = StandardScaler().fit_transform(X_fi) if scale_pls else X_fi.values
+                y_arr = y_fi.values.ravel()
+                comp_range = list(range(1, max_comp+1))
+                mse_list = []
+                for n_c in comp_range:
+                    pls_cv = PLSRegression(n_components=n_c)
+                    y_cv = cross_val_predict(pls_cv, X_arr, y_arr,
+                                             cv=min(cv_folds_pls, len(y_arr)))
+                    mse_list.append(mean_squared_error(y_arr, y_cv))
+                st.session_state.update({"pls_mse": mse_list, "pls_range": comp_range})
+
+        if st.session_state.get("pls_mse"):
+            mse_list   = st.session_state["pls_mse"]
+            comp_range = st.session_state["pls_range"]
+            best_n     = comp_range[int(np.argmin(mse_list))]
+            fig, ax    = plt.subplots(figsize=(8, 4))
+            ax.plot(comp_range, mse_list, marker="o", color="#2e86ab")
+            ax.axvline(best_n, color="#e84855", linestyle="--", label=f"Best={best_n}")
+            ax.set(xlabel="Components", ylabel="CV MSE", title="PLS Cross-Validation MSE")
+            ax.legend(); ax.grid(linestyle="--", alpha=0.5)
+            plt.tight_layout(); st.pyplot(fig); plt.close()
+            st.info(f"建議主成分數：**{best_n}**")
+
+        st.markdown("**Step 2：訓練 PLS 並計算 VIP + 係數**")
+        n_pls = st.slider("PLS 主成分數", 1, max_comp, min(3, max_comp), key="pls_n_comp")
+
+        if st.button("📐 計算 PLS", key="run_pls_vip"):
+            with st.spinner("PLS 訓練中..."):
+                scaler_pls = StandardScaler() if scale_pls else None
+                X_arr = scaler_pls.fit_transform(X_fi) if scale_pls else X_fi.values
+                y_arr = y_fi.values.ravel()
+
+                pls = PLSRegression(n_components=n_pls)
+                pls.fit(X_arr, y_arr)
+
+                # VIP scores
+                t = np.array(pls.x_scores_, dtype=float)
+                w = np.array(pls.x_weights_, dtype=float)
+                q = np.array(pls.y_loadings_, dtype=float).ravel()
+                p_feat, h = w.shape
+                s = np.array([float(t[:,j]@t[:,j]) * float(q[j])**2 for j in range(h)])
+                w_normed = (w / np.linalg.norm(w, axis=0))**2
+                vips = np.sqrt(p_feat * (w_normed @ s) / float(s.sum()))
+
+                vip_df = pd.DataFrame({"Feature": X_fi.columns, "VIP": vips})\
+                           .sort_values("VIP", ascending=False).reset_index(drop=True)
+
+                # Regression coefficients (in original space if scaled)
+                coef_raw = pls.coef_.ravel()  # (p,) in scaled space
+                reg_coef_df = pd.DataFrame({
+                    "Feature": X_fi.columns,
+                    "PLS_Coef": coef_raw,
+                    "Abs_Coef": np.abs(coef_raw),
+                }).sort_values("Abs_Coef", ascending=False).reset_index(drop=True)
+
+                # X loadings (P) — how features relate to each PC
+                x_load = pd.DataFrame(
+                    pls.x_loadings_,
+                    index=X_fi.columns,
+                    columns=[f"PC{i+1}" for i in range(n_pls)])
+
+                # X weights (W) — how features contribute to latent scores
+                x_weights = pd.DataFrame(
+                    pls.x_weights_,
+                    index=X_fi.columns,
+                    columns=[f"PC{i+1}" for i in range(n_pls)])
+
+                # Y explained variance per PC
+                y_pred = pls.predict(X_arr).ravel()
+                r2_pls = r2_score(y_arr, y_pred)
+
+                st.session_state.update({
+                    "pls_vip_df": vip_df, "pls_reg_coef_df": reg_coef_df,
+                    "pls_x_loadings": x_load, "pls_x_weights": x_weights,
+                    "pls_r2": r2_pls, "pls_model": pls,
+                })
+            st.success(f"✅ 完成！R² = {r2_pls:.3f}")
+
+        if st.session_state.get("pls_vip_df") is None:
+            return
+        vip_df       = st.session_state["pls_vip_df"]
+        reg_coef_df  = st.session_state["pls_reg_coef_df"]
+        x_load       = st.session_state["pls_x_loadings"]
+        x_weights    = st.session_state["pls_x_weights"]
+        r2_pls       = st.session_state["pls_r2"]
+
+        st.metric("PLS R²", f"{r2_pls:.3f}")
+
+        pls_subtabs = st.tabs(["VIP Score", "迴歸係數", "X Loadings", "X Weights"])
+
+        with pls_subtabs[0]:
+            top_vip = vip_df.head(top_n_fi)
+            fig, ax = plt.subplots(figsize=(10, max(5, top_n_fi*0.45)))
+            ax.barh(top_vip["Feature"], top_vip["VIP"],
+                    color=["#e84855" if v>=1.0 else "#2e86ab" for v in top_vip["VIP"]], alpha=0.85)
+            ax.axvline(1.0, color="#e84855", linestyle="--", lw=1.5, label="VIP=1")
+            ax.set_title(f"PLS VIP Score (Top {top_n_fi})", fontsize=13)
+            ax.set_xlabel("VIP Score"); ax.invert_yaxis(); ax.legend()
+            ax.grid(axis="x", linestyle="--", alpha=0.5)
+            plt.tight_layout(); st.pyplot(fig); plt.close()
+            st.caption("VIP ≥ 1.0（紅色）= 對目標變數有顯著影響。")
+            st.dataframe(vip_df.style.background_gradient(cmap="Reds", subset=["VIP"]),
+                         width="stretch", hide_index=True)
+
+        with pls_subtabs[1]:
+            st.markdown("**PLS 迴歸係數**（標準化空間，反映各特徵對 Y 的線性貢獻方向和大小）")
+            top_coef = reg_coef_df.head(top_n_fi)
+            fig, ax  = plt.subplots(figsize=(10, max(5, top_n_fi*0.45)))
+            ax.barh(top_coef["Feature"], top_coef["PLS_Coef"],
+                    color=["#e84855" if v>0 else "#2e86ab" for v in top_coef["PLS_Coef"]], alpha=0.85)
+            ax.axvline(0, color="black", lw=1)
+            ax.set_title("PLS Regression Coefficients", fontsize=13)
+            ax.set_xlabel("Coefficient（正=增加Y，負=降低Y）"); ax.invert_yaxis()
+            ax.grid(axis="x", linestyle="--", alpha=0.5)
+            plt.tight_layout(); st.pyplot(fig); plt.close()
+            st.dataframe(reg_coef_df.style.background_gradient(cmap="RdBu_r", subset=["PLS_Coef"]),
+                         width="stretch", hide_index=True)
+
+        with pls_subtabs[2]:
+            st.markdown("**X Loadings（P）** — 原始特徵在各主成分上的載荷（特徵與主成分的相關性）")
+            st.dataframe(x_load.style.background_gradient(cmap="RdBu_r"), width="stretch")
+            # Heatmap
+            import seaborn as sns
+            fig, ax = plt.subplots(figsize=(max(6, n_pls*1.5), max(6, len(X_fi.columns)*0.35)))
+            sns.heatmap(x_load, annot=True, fmt=".3f", cmap="RdBu_r",
+                        center=0, linewidths=0.3, ax=ax, annot_kws={"size":7})
+            ax.set_title("X Loadings (P) Heatmap")
+            plt.tight_layout(); st.pyplot(fig); plt.close()
+
+        with pls_subtabs[3]:
+            st.markdown("**X Weights（W）** — 特徵對 PLS 潛在變數（latent score）的貢獻權重")
+            st.dataframe(x_weights.style.background_gradient(cmap="RdBu_r"), width="stretch")
+            fig, ax = plt.subplots(figsize=(max(6, n_pls*1.5), max(6, len(X_fi.columns)*0.35)))
+            import seaborn as sns
+            sns.heatmap(x_weights, annot=True, fmt=".3f", cmap="RdBu_r",
+                        center=0, linewidths=0.3, ax=ax, annot_kws={"size":7})
+            ax.set_title("X Weights (W) Heatmap")
+            plt.tight_layout(); st.pyplot(fig); plt.close()
+
+
+# ═══════════════════════════════════════════════════════════
+#  Main render
+# ═══════════════════════════════════════════════════════════
+def render(selected_process_df):
+    st.header("特徵重要性分析")
+    _cd = st.session_state.get("clean_df")
+    work_df = _cd if _cd is not None else selected_process_df
+
+    if work_df is None:
+        st.info("請先在側欄選擇製程步驟。"); return
+
+    numeric_cols  = work_df.select_dtypes(include=["number"]).columns.tolist()
+    stored_target = st.session_state.get("target_col")
+    default_fi    = numeric_cols.index(stored_target) if stored_target in numeric_cols else 0
+    target_col_fi = st.selectbox("目標欄位（Y）", numeric_cols, index=default_fi, key="fi_target")
+    top_n_fi      = st.slider("顯示前 N 個特徵", 5, 30, 15, key="fi_topn")
+
+    # Prepare X, y once
+    if st.button("📦 準備資料", key="run_fi_prepare"):
+        try:
+            exclude = [c for c in ["BatchID", target_col_fi] if c in work_df.columns]
+            X_fi = work_df.drop(columns=exclude, errors="ignore").select_dtypes(include=["number"])
+            y_fi = work_df[target_col_fi]
+            valid = y_fi.notna() & X_fi.notna().all(axis=1)
+            X_fi = X_fi[valid].reset_index(drop=True)
+            y_fi = y_fi[valid].reset_index(drop=True)
+            st.session_state.update({
+                "fi_X": X_fi, "fi_y": y_fi, "fi_target_col": target_col_fi,
+                "fi_rf": None, "shap_vals": None,
+                "lasso_coef_df": None, "pls_vip_df": None,
+            })
+            st.success(f"✅ 資料準備完成：{X_fi.shape[0]} 筆 × {X_fi.shape[1]} 特徵")
+        except Exception as e:
+            st.error(f"失敗：{e}")
+
+    if st.session_state.get("fi_X") is None:
+        return
+
+    X_fi = st.session_state["fi_X"]
+    y_fi = st.session_state["fi_y"]
+
+    fi_subtabs = st.tabs(["🌲 RF 重要性", "🔪 Lasso 重要性", "🔮 SHAP 分析", "📐 PLS-VIP"])
+    _render_rf_tab(fi_subtabs[0], X_fi, y_fi, top_n_fi)
+    _render_lasso_tab(fi_subtabs[1], X_fi, y_fi, top_n_fi)
+    _render_shap_tab(fi_subtabs[2], X_fi, y_fi, top_n_fi)
+    _render_pls_tab(fi_subtabs[3], X_fi, y_fi, top_n_fi)
