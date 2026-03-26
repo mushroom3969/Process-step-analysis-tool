@@ -431,10 +431,9 @@ def _render_main(selected_process_df, show_mean: bool = True):
                 section_title="📋 本次統計篩選變更欄位",
                 show_mean=show_mean,
             )
-
-    # ══════════════════════════════════════════════════════════
-    # ── 區塊 C：當前特徵總覽（可個別反悔）────────────────────
-    # ══════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════
+    # ── 區塊 C：當前特徵總覽（個別管理與反悔） ────────────────────────────────
+    # ══════════════════════════════════════════════════════════════════════════
     if st.session_state.get("clean_df") is not None:
         clean_df = st.session_state["clean_df"]
         op_log   = st.session_state.get("fe_op_log", [])
@@ -444,71 +443,84 @@ def _render_main(selected_process_df, show_mean: bool = True):
 
         numeric_cols = clean_df.select_dtypes(include=["number"]).columns.tolist()
         non_batch_num = [c for c in numeric_cols if c != "BatchID"]
+        
         m1, m2, m3 = st.columns(3)
         m1.metric("當前欄位數", clean_df.shape[1])
         m2.metric("數值欄位數", len(non_batch_num))
         m3.metric("批次數", clean_df.shape[0])
+
         if not non_batch_num:
             st.warning("目前沒有可顯示的數值欄位。")
-        return
+        else:
+            # 🔍 搜尋與篩選邏輯 (確保這裡縮排一致)
+            search_q = st.text_input("🔍 欄位關鍵字篩選", key="fe_search", placeholder="留空顯示全部...")
+            
+            display_cols = (
+                [c for c in non_batch_num if search_q.lower() in c.lower()]
+                if search_q.strip() else non_batch_num
+            )
+            
+            st.caption(f"顯示 {len(display_cols)} / {len(non_batch_num)} 個欄位")
 
-    search_q = st.text_input("🔍 欄位關鍵字篩選", key="fe_search",
-                                  placeholder="留空顯示全部...")
-        display_cols = (
-            [c for c in non_batch_num if search_q.lower() in c.lower()]
-            if search_q.strip() else non_batch_num
-        )
-        st.caption(f"顯示 {len(display_cols)} / {len(non_batch_num)} 個欄位")
+            # 建立操作記錄快照以便判斷狀態
+            all_added = set()
+            for entry in op_log:
+                all_added.update(entry.get("cols_added", []))
+            
+            all_removed_from_base = set()
+            for entry in op_log:
+                all_removed_from_base.update(entry.get("cols_removed", []))
 
-        all_added = set()
-        for entry in op_log:
-            all_added.update(entry.get("cols_added", []))
-        all_removed_from_base = set()
-        for entry in op_log:
-            all_removed_from_base.update(entry.get("cols_removed", []))
+            # 🛠️ 遍歷顯示各個特徵卡片
+            import hashlib as _hl_ov
+            import matplotlib.pyplot as plt
 
-        import hashlib as _hl_ov
-        for col in display_cols:
-            _ch = _hl_ov.md5(col.encode()).hexdigest()[:12]
-            badge = " `🆕 新增`" if col in all_added else ""
-            with st.expander(f"**{col[:75]}**{badge}", expanded=False):
-                exp_l, exp_r = st.columns([5, 1])
+            for col in display_cols:
+                # 使用 Hash 確保 Key 唯一且不包含特殊字元
+                _ch = _hl_ov.md5(col.encode()).hexdigest()[:12]
+                badge = " `🆕 新增`" if col in all_added else ""
+                
+                with st.expander(f"**{col[:75]}**{badge}", expanded=False):
+                    exp_l, exp_r = st.columns([5, 1])
 
-                with exp_l:
-                    s = clean_df[col].dropna()
-                    stat_cols = st.columns(6)
-                    stat_cols[0].metric("n",       len(s))
-                    stat_cols[1].metric("Mean",    f"{s.mean():.4f}" if len(s) else "—")
-                    stat_cols[2].metric("Median",  f"{s.median():.4f}" if len(s) else "—")
-                    stat_cols[3].metric("SD",      f"{s.std(ddof=1):.4f}" if len(s) > 1 else "—")
-                    stat_cols[4].metric("Min",     f"{s.min():.4f}" if len(s) else "—")
-                    stat_cols[5].metric("Max",     f"{s.max():.4f}" if len(s) else "—")
+                    with exp_l:
+                        s = clean_df[col].dropna()
+                        stat_cols = st.columns(6)
+                        stat_cols[0].metric("n",       len(s))
+                        stat_cols[1].metric("Mean",    f"{s.mean():.4f}" if len(s) else "—")
+                        stat_cols[2].metric("Median",  f"{s.median():.4f}" if len(s) else "—")
+                        stat_cols[3].metric("SD",      f"{s.std(ddof=1):.4f}" if len(s) > 1 else "—")
+                        stat_cols[4].metric("Min",     f"{s.min():.4f}" if len(s) else "—")
+                        stat_cols[5].metric("Max",     f"{s.max():.4f}" if len(s) else "—")
 
-                    color = "#2ca02c" if col in all_added else "#2e86ab"
-                    try:
-                        fig = _mini_trend(clean_df, col, color=color, show_mean=show_mean)
-                        st.pyplot(fig, use_container_width=True)
-                        plt.close()
-                    except Exception as e:
-                        st.caption(f"繪圖失敗：{e}")
+                        color = "#2ca02c" if col in all_added else "#2e86ab"
+                        try:
+                            # 確保 show_mean 在之前的代碼中有定義，若無則預設為 True
+                            show_mean_val = st.session_state.get("show_mean", True)
+                            fig = _mini_trend(clean_df, col, color=color, show_mean=show_mean_val)
+                            st.pyplot(fig, use_container_width=True)
+                            plt.close(fig)
+                        except Exception as e:
+                            st.caption(f"繪圖失敗：{e}")
 
-                with exp_r:
-                    st.markdown("<br><br><br>", unsafe_allow_html=True)
+                    with exp_r:
+                        st.markdown("<br><br>", unsafe_allow_html=True)
+                        
+                        # 反悔按鈕
+                        was_touched = col in all_added or col in all_removed_from_base
+                        if was_touched:
+                            if st.button("↩️ 反悔", key=f"fi_ov_undo_{_ch}", 
+                                         help="還原此欄位的最近一次操作"):
+                                _undo_col(col)
+                                st.rerun()
 
-                    was_touched = col in all_added or col in all_removed_from_base
-                    if was_touched:
-                        if st.button("↩️ 反悔", key=f"fi_ov_undo_{_ch}",
-                                     help=f"還原此欄位的最近一次操作",
-                                     type="secondary"):
-                            _undo_col(col)
+                        # 刪除按鈕
+                        if st.button("🗑️ 刪除", key=f"fi_ov_drop_{_ch}", 
+                                     help="手動刪除此欄位", type="secondary"):
+                            snapshot_before = clean_df.copy()
+                            new_clean = clean_df.drop(columns=[col])
+                            st.session_state["clean_df"] = new_clean
+                            # 呼叫記錄函數
+                            _push_op("manual_drop", [], [col], snapshot_before)
+                            st.toast(f"🗑️ 已刪除：{col}")
                             st.rerun()
-
-                    if st.button("🗑️ 刪除", key=f"fi_ov_drop_{_ch}",
-                                 help=f"手動刪除此欄位",
-                                 type="secondary"):
-                        snapshot_before = clean_df.copy()
-                        new_clean = clean_df.drop(columns=[col])
-                        st.session_state["clean_df"] = new_clean
-                        _push_op("manual_drop", [col], [], snapshot_before)
-                        st.toast(f"🗑️ 已刪除：{col}", icon="🗑️")
-                        st.rerun() 
