@@ -1,4 +1,4 @@
-"""Tab 6 — 特徵重要性（RF + Lasso + SHAP + PLS-VIP + 係數解釋）"""
+"""Tab 6 — 特徵重要性（RF + Lasso + SHAP + PLS-VIP + 交互作用）"""
 import sys, os as _os
 _dir = _os.path.dirname(_os.path.abspath(__file__))
 _root = _os.path.dirname(_dir)
@@ -11,7 +11,6 @@ import textwrap
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
 import seaborn as sns
 import streamlit as st
 
@@ -65,7 +64,7 @@ def _render_rf_tab(fi_subtab, X_fi, y_fi, top_n_fi):
                 }).sort_values("Perm_Importance", ascending=False).reset_index(drop=True)
                 r2 = r2_score(y_fi, rf.predict(X_fi))
                 st.session_state.update({"fi_rf": rf, "fi_perm_df": perm_df, "fi_r2": r2,
-                                          "shap_vals": None})
+                                         "shap_vals": None})
             st.success(f"✅ 完成！訓練 R² = {r2:.3f}")
 
         if st.session_state.get("fi_perm_df") is None:
@@ -107,8 +106,8 @@ def _render_lasso_tab(fi_subtab, X_fi, y_fi, top_n_fi):
             la1, la2 = st.columns(2)
             use_cv = la1.checkbox("自動選擇 α（LassoCV）", value=True, key="lasso_use_cv")
             alpha_manual = la2.number_input("手動 α（use_cv=False 時）",
-                                             min_value=1e-6, max_value=10.0,
-                                             value=0.01, format="%.4f", key="lasso_alpha")
+                                              min_value=1e-6, max_value=10.0,
+                                              value=0.01, format="%.4f", key="lasso_alpha")
             la3, la4 = st.columns(2)
             max_iter = la3.slider("max_iter", 500, 5000, 1000, 500, key="lasso_max_iter")
             cv_folds = la4.slider("CV folds（LassoCV）", 3, 10, 5, key="lasso_cv")
@@ -179,7 +178,7 @@ def _render_lasso_tab(fi_subtab, X_fi, y_fi, top_n_fi):
 
 
 # ═══════════════════════════════════════════════════════════
-#  SHAP Tab
+#  SHAP Tab (Enhanced with interaction feature)
 # ═══════════════════════════════════════════════════════════
 
 def _render_shap_tab(fi_subtab, X_fi, y_fi, top_n_fi):
@@ -197,7 +196,7 @@ def _render_shap_tab(fi_subtab, X_fi, y_fi, top_n_fi):
                     explainer = shap_lib.TreeExplainer(rf)
                     shap_vals = explainer.shap_values(X_fi)
                 st.session_state.update({"shap_vals": shap_vals,
-                                          "shap_explainer": explainer, "shap_lib": shap_lib})
+                                         "shap_explainer": explainer, "shap_lib": shap_lib})
                 st.success("✅ SHAP 完成！")
             except Exception as e:
                 st.error(f"SHAP 失敗：{e}")
@@ -243,6 +242,7 @@ def _render_shap_tab(fi_subtab, X_fi, y_fi, top_n_fi):
             fix_labels(plt.gca()); st.pyplot(plt.gcf()); plt.close()
             st.caption(f"樣本{idx}｜預測:{rf.predict(X_fi.iloc[[idx]])[0]:.3f}｜實際:{y_fi.iloc[idx]:.3f}｜基準:{base_val:.3f}")
 
+        # 🔄 [功能強化] — SHAP Dependence Plot 加入交互功能
         with shap_subtabs[3]:
             st.markdown("#### 特徵交互作用分析 (Dependence Plot)")
             st.caption("觀察主特徵數值變化時，SHAP 值如何隨交互特徵（顏色）改變。")
@@ -251,42 +251,27 @@ def _render_shap_tab(fi_subtab, X_fi, y_fi, top_n_fi):
             dep_feat = c1.selectbox("主特徵 (X軸)", X_fi.columns.tolist(), key="shap_dep_feat")
             
             # 增加一個選項讓使用者決定要不要自動尋找最強交互項
-            auto_interaction = c2.checkbox("自動尋找最強交互特徵", value=True)
+            auto_interaction = c2.checkbox("自動尋找最強交互特徵", value=True, key="shap_dep_auto")
             
+            # 根據 Checkbox 決定下拉選單的內容
             if auto_interaction:
-                dep_int = "auto"
+                dep_int_final = "auto"
+                c2.info("SHAP 將自動顯示與主特徵相關性最強的特徵作為顏色軸。")
             else:
-                dep_int = c2.selectbox("交互著色特徵 (Color)", X_fi.columns.tolist(), key="shap_dep_int")
-        
-            fig, ax = plt.subplots(figsize=(10, 6))
-            
-            # 使用 shap_lib 繪製
-            shap_lib.dependence_plot(
-                dep_feat, 
-                shap_arr, 
-                X_fi, # 這裡建議傳入原始 X_fi 保持 Label 可讀性
-                interaction_index=dep_int,
-                ax=ax, 
-                show=False
-            )
-            
-            # 美化標籤
-            ax.set_title(f"Interaction: {dep_feat} vs {dep_int if dep_int != 'auto' else 'Most Correlated'}", fontsize=12)
-            plt.tight_layout()
-            st.pyplot(fig)
-            plt.close()
+                dep_int_sel = c2.selectbox("交互著色特徵 (Color)", ["auto"]+X_fi.columns.tolist(), key="shap_dep_int_manual")
+                dep_int_final = dep_int_sel if dep_int_sel != "auto" else "auto"
 
-def _render_interaction_heatmap(X_fi, top_n_fi):
-    st.markdown("#### Top 特徵相關性矩陣")
-    st.caption("高相關性的特徵對通常隱含較強的交互作用。")
-    
-    top_feats = st.session_state["fi_perm_df"]["Feature"].head(top_n_fi).tolist()
-    corr = X_fi[top_feats].corr()
-    
-    fig, ax = plt.subplots(figsize=(10, 8))
-    sns.heatmap(corr, annot=True, fmt=".2f", cmap="RdBu_r", center=0, ax=ax)
-    st.pyplot(fig)
-    plt.close()
+            fig, ax = plt.subplots(figsize=(10, 6))
+            shap_lib.dependence_plot(short_map[dep_feat], shap_arr, X_short,
+                                     interaction_index=(None if dep_int_final=="auto" else short_map[dep_int_final]),
+                                     ax=ax, show=False)
+            
+            # 修復標籤和標題，保持 Label 可讀性
+            _label_title = f"Inter: {dep_feat} vs {dep_int_final}" if dep_int_final != "auto" else f"Inter: {dep_feat} vs Most Correlated"
+            ax.set_title(_label_title, fontsize=12)
+            ax.set_xlabel(dep_feat, fontsize=9)
+            plt.tight_layout()
+            st.pyplot(fig); plt.close()
 
 
 # ═══════════════════════════════════════════════════════════
@@ -304,7 +289,7 @@ def _render_pls_tab(fi_subtab, X_fi, y_fi, top_n_fi):
         with st.expander("⚙️ PLS Hyperparameter 設定", expanded=False):
             p1, p2 = st.columns(2)
             cv_folds_pls = p1.slider("CV folds", 3, 10, 5, key="pls_cv_folds")
-            scale_pls    = p2.checkbox("標準化 X (推薦)", value=True, key="pls_scale")
+            scale_pls     = p2.checkbox("標準化 X (推薦)", value=True, key="pls_scale")
 
         st.markdown("**Step 1：CV 選最佳主成分數**")
         if st.button("📉 計算 PLS CV MSE", key="run_pls_cv"):
@@ -324,7 +309,7 @@ def _render_pls_tab(fi_subtab, X_fi, y_fi, top_n_fi):
             mse_list   = st.session_state["pls_mse"]
             comp_range = st.session_state["pls_range"]
             best_n     = comp_range[int(np.argmin(mse_list))]
-            fig, ax    = plt.subplots(figsize=(8, 4))
+            fig, ax     = plt.subplots(figsize=(8, 4))
             ax.plot(comp_range, mse_list, marker="o", color="#2e86ab")
             ax.axvline(best_n, color="#e84855", linestyle="--", label=f"Best={best_n}")
             ax.set(xlabel="Components", ylabel="CV MSE", title="PLS Cross-Validation MSE")
@@ -411,7 +396,7 @@ def _render_pls_tab(fi_subtab, X_fi, y_fi, top_n_fi):
             plt.tight_layout(); st.pyplot(fig); plt.close()
             st.caption("VIP ≥ 1.0（紅色）= 對目標變數有顯著影響。")
             st.dataframe(vip_df.style.background_gradient(cmap="Reds", subset=["VIP"]),
-                         width="stretch", hide_index=True)
+                                 width="stretch", hide_index=True)
 
         with pls_subtabs[1]:
             st.markdown("**PLS 迴歸係數**（標準化空間，反映各特徵對 Y 的線性貢獻方向和大小）")
@@ -425,13 +410,12 @@ def _render_pls_tab(fi_subtab, X_fi, y_fi, top_n_fi):
             ax.grid(axis="x", linestyle="--", alpha=0.5)
             plt.tight_layout(); st.pyplot(fig); plt.close()
             st.dataframe(reg_coef_df.style.background_gradient(cmap="RdBu_r", subset=["PLS_Coef"]),
-                         width="stretch", hide_index=True)
+                                 width="stretch", hide_index=True)
 
         with pls_subtabs[2]:
             st.markdown("**X Loadings（P）** — 原始特徵在各主成分上的載荷（特徵與主成分的相關性）")
             st.dataframe(x_load.style.background_gradient(cmap="RdBu_r"), width="stretch")
             # Heatmap
-            import seaborn as sns
             fig, ax = plt.subplots(figsize=(max(6, n_pls*1.5), max(6, len(X_fi.columns)*0.35)))
             sns.heatmap(x_load, annot=True, fmt=".3f", cmap="RdBu_r",
                         center=0, linewidths=0.3, ax=ax, annot_kws={"size":7})
@@ -442,11 +426,54 @@ def _render_pls_tab(fi_subtab, X_fi, y_fi, top_n_fi):
             st.markdown("**X Weights（W）** — 特徵對 PLS 潛在變數（latent score）的貢獻權重")
             st.dataframe(x_weights.style.background_gradient(cmap="RdBu_r"), width="stretch")
             fig, ax = plt.subplots(figsize=(max(6, n_pls*1.5), max(6, len(X_fi.columns)*0.35)))
-            import seaborn as sns
             sns.heatmap(x_weights, annot=True, fmt=".3f", cmap="RdBu_r",
                         center=0, linewidths=0.3, ax=ax, annot_kws={"size":7})
             ax.set_title("X Weights (W) Heatmap")
             plt.tight_layout(); st.pyplot(fig); plt.close()
+
+
+# ═══════════════════════════════════════════════════════════
+#  🔄 [新功能] — 相關性熱點圖函式
+# ═══════════════════════════════════════════════════════════
+
+def _render_correlation_heatmap(X_fi, top_n_fi):
+    """
+    繪製 Top N 個重要特徵之間的相關性熱點圖，協助初步發現潛在交互作用。
+    """
+    with st.spinner("生成相關性矩陣中..."):
+        st.markdown("#### Top 特徵相關性矩陣 (初步交互作用探索)")
+        st.caption("觀察 Top 特徵之間的線性相關程度。高相關性的特徵對（深紅或深藍）通常是交互作用分析的關鍵起點。")
+        
+        # 從 Session State 取得 RF Permutation Importance 的結果
+        fi_df = st.session_state.get("fi_perm_df")
+        if fi_df is None:
+            st.warning("請先在「RF 重要性」分頁訓練 Random Forest 模型，以確定 Top 特徵。")
+            return
+            
+        # 取得 Top N 特徵清單
+        top_feats = fi_df["Feature"].head(top_n_fi).tolist()
+        
+        # 計算相關性矩陣
+        corr = X_fi[top_feats].corr()
+        
+        # 繪圖
+        fig, ax = plt.subplots(figsize=(max(8, top_n_fi*0.4), max(6, top_n_fi*0.35)))
+        sns.heatmap(
+            corr, 
+            annot=True, 
+            fmt=".2f", 
+            cmap="RdBu_r", 
+            center=0, 
+            linewidths=0.3, 
+            ax=ax, 
+            annot_kws={"size": max(6, 12 - top_n_fi//4)}, # 根據 N 動態調整字體大小
+            cbar_kws={"shrink": 0.8}
+        )
+        ax.set_title(f"Top {top_n_fi} Features Correlation Heatmap", fontsize=13)
+        plt.tight_layout()
+        st.pyplot(fig)
+        plt.close()
+        st.info("💡 **提示：** 此為線性相關性。更複雜的非線性交互作用請移步「🔮 SHAP 分析」分頁下的 Dependence Plot 觀察。")
 
 
 # ═══════════════════════════════════════════════════════════
@@ -490,12 +517,13 @@ def render(selected_process_df):
     X_fi = st.session_state["fi_X"]
     y_fi = st.session_state["fi_y"]
 
+    # 🔄 [新功能] — 在 Tabs 清單最後加一個「🔄 交互作用探索」
     fi_subtabs = st.tabs(["🌲 RF 重要性", "🔪 Lasso 重要性", "🔮 SHAP 分析", "📐 PLS-VIP", "🔄 交互作用探索"])
     _render_rf_tab(fi_subtabs[0], X_fi, y_fi, top_n_fi)
     _render_lasso_tab(fi_subtabs[1], X_fi, y_fi, top_n_fi)
     _render_shap_tab(fi_subtabs[2], X_fi, y_fi, top_n_fi)
     _render_pls_tab(fi_subtabs[3], X_fi, y_fi, top_n_fi)
-
+    
+    # 🔄 [新功能] — 渲染交互作用分頁的熱點圖
     with fi_subtabs[4]:
-        if st.session_state.get("fi_X") is not None:
-            _render_interaction_heatmap(st.session_state["fi_X"], top_n_fi)
+        _render_correlation_heatmap(X_fi, top_n_fi)
