@@ -1,4 +1,4 @@
-"""Tab 4 — 相關性分析"""
+"""Tab — 相關性分析"""
 import sys, os as _os
 _dir = _os.path.dirname(_os.path.abspath(__file__))
 _root = _os.path.dirname(_dir)

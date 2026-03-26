@@ -1,4 +1,4 @@
-"""Tab 3 — 缺失值分析"""
+"""Tab — 缺失值分析"""
 import sys, os as _os
 _dir = _os.path.dirname(_os.path.abspath(__file__))
 _root = _os.path.dirname(_dir)
@@ -33,7 +33,6 @@ def render(selected_process_df):
 
         st.markdown("#### 缺失值熱圖")
         n_miss_cols = len(summary_df)
-        # FIX 3: dynamic height — 0.35px per feature, min 4, max 40
         fig_h = max(4, min(40, n_miss_cols * 0.38))
         fig, ax = plt.subplots(figsize=(14, fig_h))
         missing_matrix = work_df[summary_df.index].isnull().T
