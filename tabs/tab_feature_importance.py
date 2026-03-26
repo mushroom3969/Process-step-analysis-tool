@@ -244,36 +244,43 @@ def _render_shap_tab(fi_subtab, X_fi, y_fi, top_n_fi):
             fix_labels(plt.gca()); st.pyplot(plt.gcf()); plt.close()
             st.caption(f"樣本{idx}｜預測:{rf.predict(X_fi.iloc[[idx]])[0]:.3f}｜實際:{y_fi.iloc[idx]:.3f}｜基準:{base_val:.3f}")
 
-        # 🔄 [功能強化] — SHAP Dependence Plot 加入交互功能
+        # 在 _render_shap_tab 內的 Dependence Plot 區塊
         with shap_subtabs[3]:
             st.markdown("#### 特徵交互作用分析 (Dependence Plot)")
-            st.caption("觀察主特徵數值變化時，SHAP 值如何隨交互特徵（顏色）改變。")
             
             c1, c2 = st.columns(2)
             dep_feat = c1.selectbox("主特徵 (X軸)", X_fi.columns.tolist(), key="shap_dep_feat")
-            
-            # 增加一個選項讓使用者決定要不要自動尋找最強交互項
             auto_interaction = c2.checkbox("自動尋找最強交互特徵", value=True, key="shap_dep_auto")
-            
-            # 根據 Checkbox 決定下拉選單的內容
+        
+            # 這裡修正：明確取得 SHAP 推薦的交互特徵名稱
             if auto_interaction:
-                dep_int_final = "auto"
-                c2.info("SHAP 將自動顯示與主特徵相關性最強的特徵作為顏色軸。")
+                # 讓 SHAP 幫我們找 index
+                dep_int_index = "auto" 
             else:
-                dep_int_sel = c2.selectbox("交互著色特徵 (Color)", ["auto"]+X_fi.columns.tolist(), key="shap_dep_int_manual")
-                dep_int_final = dep_int_sel if dep_int_sel != "auto" else "auto"
-
+                dep_int_sel = c2.selectbox("交互著色特徵 (Color)", X_fi.columns.tolist(), key="shap_dep_int_manual")
+                dep_int_index = short_map[dep_int_sel]
+        
             fig, ax = plt.subplots(figsize=(10, 6))
-            shap_lib.dependence_plot(short_map[dep_feat], shap_arr, X_short,
-                                     interaction_index=(None if dep_int_final=="auto" else short_map[dep_int_final]),
-                                     ax=ax, show=False)
             
-            # 修復標籤和標題，保持 Label 可讀性
-            _label_title = f"Inter: {dep_feat} vs {dep_int_final}" if dep_int_final != "auto" else f"Inter: {dep_feat} vs Most Correlated"
-            ax.set_title(_label_title, fontsize=12)
-            ax.set_xlabel(dep_feat, fontsize=9)
+            # 關鍵修正：確保傳入的是 X_short 以匹配 shap_arr 的維度
+            shap_lib.dependence_plot(
+                short_map[dep_feat], 
+                shap_arr, 
+                X_short, # 使用簡化後的 DataFrame
+                interaction_index=dep_int_index,
+                ax=ax, 
+                show=False
+            )
+            
+            # 強制重繪標題，顯示到底跟誰交互了
+            # SHAP 在 auto 模式下會自動在右側加上顏色條標籤，如果沒出現，代表沒找到強交互
+            ax.set_title(f"Interaction Analysis: {dep_feat}", fontsize=12)
+            ax.set_xlabel(f"{dep_feat} (Actual Value)", fontsize=10)
+            ax.set_ylabel(f"SHAP Value (Impact on Yield)", fontsize=10)
+            
             plt.tight_layout()
-            st.pyplot(fig); plt.close()
+            st.pyplot(fig)
+            plt.close()
 
 
 # ═══════════════════════════════════════════════════════════
