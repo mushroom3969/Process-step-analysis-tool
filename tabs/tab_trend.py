@@ -499,7 +499,7 @@ def render(selected_process_df):
         st.markdown("#### 🎨 特徵比較圖（X vs Y，可加入第三參數 Hue 著色）")
 
         numeric_cols = work_df.select_dtypes(include=["number"]).columns.tolist()
-        display_options = ["index"] + numeric_cols
+        plot_options = ["index"] + numeric_cols
         
         if len(numeric_cols) < 2:
             st.warning("需要至少 2 個數值欄位。")
