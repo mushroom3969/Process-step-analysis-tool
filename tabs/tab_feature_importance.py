@@ -135,11 +135,13 @@ def _render_lasso_tab(fi_subtab, X_fi, y_fi, top_n_fi):
                 r2_lasso = r2_score(y_fi, model.predict(X_scaled))
                 n_nonzero = (coef_df["Coefficient"] != 0).sum()
 
-                st.session_state.update({
-                    "lasso_model": model, "lasso_coef_df": coef_df,
-                    "lasso_alpha": best_alpha, "lasso_r2": r2_lasso,
-                    "lasso_scaler": scaler, "lasso_n_nonzero": n_nonzero,
-                })
+               # 修正後的寫法
+                st.session_state["lasso_model"] = model
+                st.session_state["lasso_coef_df"] = coef_df
+                st.session_state["lasso_alpha_val"] = best_alpha  # 建議改名避免與 widget key 衝突
+                st.session_state["lasso_r2"] = r2_lasso
+                st.session_state["lasso_scaler"] = scaler
+                st.session_state["lasso_n_nonzero"] = n_nonzero
             st.success(f"✅ 完成！α={best_alpha:.4f}，R²={r2_lasso:.3f}，非零係數：{n_nonzero}/{X_fi.shape[1]}")
 
         if st.session_state.get("lasso_coef_df") is None:
