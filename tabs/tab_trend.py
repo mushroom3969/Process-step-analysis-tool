@@ -145,8 +145,23 @@ def plot_feature_comparison(
         zones = []
 
     plot_df  = _sort_df(df, batch_col)
-    x_vals   = plot_df[feat_x].values.astype(float)
-    y_vals   = plot_df[feat_y].values.astype(float)
+
+    # ── 改動點 1：建立一個統一的取值輔助函式 ──────────────────────
+    def _get_val(data, key):
+        if key == "index":
+            # 如果 index 是數值型態直接轉 float；若不是則轉序號 (0, 1, 2...)
+            if np.issubdtype(data.index.dtype, np.number):
+                return data.index.values.astype(float)
+            else:
+                return np.arange(len(data)).astype(float)
+        return data[key].values.astype(float)
+
+    # ── 改動點 2：使用輔助函式獲取 X, Y 數值 ─────────────────────
+    x_vals = _get_val(plot_df, feat_x)
+    y_vals = _get_val(plot_df, feat_y)
+    
+    # 注意：_apply_smooth 內部也必須支援 index，建議直接傳入 x_vals/y_vals 
+    # 或者在 _apply_smooth 內部實作相同的 get_val 邏輯
     x_vals_s, y_vals_s = _apply_smooth(plot_df, feat_x, feat_y, smooth_method, frac)
 
     # 決定 hue 數值來源
@@ -154,8 +169,11 @@ def plot_feature_comparison(
         hue_vals = x_vals.copy()
         hue_label = feat_x
     else:
-        hue_vals  = plot_df[hue_feat].values.astype(float) if hue_feat in plot_df.columns \
-                    else x_vals.copy()
+        # ── 改動點 3：支援 hue 使用 index ──────────────────────
+        if hue_feat == "index":
+            hue_vals = _get_val(plot_df, "index")
+        else:
+            hue_vals = plot_df[hue_feat].values.astype(float) if hue_feat in plot_df.columns else x_vals.copy()
         hue_label = hue_feat
 
     colors_list, legend_items, sm, zone_labels = _build_hue_colors(
@@ -220,12 +238,20 @@ def plot_feature_comparison(
                     bbox=dict(boxstyle="round,pad=0.4", facecolor="white",
                               edgecolor="#cccccc", alpha=0.92))
 
-        ax.set_xlabel(textwrap.shorten(feat_x, 55), fontsize=10)
-        ax.set_ylabel(textwrap.shorten(feat_y, 55), fontsize=10)
+        # ─── 插入改動點 4 ───
+        display_x = "Sample Index" if feat_x == "index" else feat_x
+        display_y = feat_y  # 如果 feat_y 不太可能是 index，可以直接用原變數，或同樣判斷
+
+        # 修改原本的 set_xlabel / set_ylabel
+        ax.set_xlabel(textwrap.shorten(display_x, 55), fontsize=10)
+        ax.set_ylabel(textwrap.shorten(display_y, 55), fontsize=10)
+        
+        # Title 也要同步修改，才不會顯示 "index vs Feature"
         hue_suffix = f"  [hue: {textwrap.shorten(hue_label, 30)}]" \
                      if hue_feat and hue_feat != feat_x else ""
-        ax.set_title(f"{textwrap.shorten(feat_y, 40)}  vs  {textwrap.shorten(feat_x, 40)}"
+        ax.set_title(f"{textwrap.shorten(display_y, 40)}  vs  {textwrap.shorten(display_x, 40)}"
                      + hue_suffix, fontsize=11)
+        
         ax.grid(linestyle="--", alpha=0.35)
         plt.tight_layout()
         return fig, stat_rows
