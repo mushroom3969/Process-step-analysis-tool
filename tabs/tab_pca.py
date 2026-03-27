@@ -39,15 +39,29 @@ def render(selected_process_df):
 
     with st.expander("⚙️ PCA 設定", expanded=True):
         pc1, pc2, pc3 = st.columns(3)
-        target_col_pca = pc1.selectbox("排除的目標欄位（Y）", numeric_options,
-                                        index=default_idx, key="pca_target")
+
+        # 預設選入上一頁儲存的目標欄位
+        default_excl = []
+        if stored_target and stored_target in numeric_options:
+            default_excl = [stored_target]
+
+        excl_cols = pc1.multiselect(
+            "排除的欄位（可多選）",
+            numeric_options,
+            default=default_excl,
+            key="pca_target",
+            help="通常排除目標變數（Y）及其他不想納入 PCA 的欄位",
+        )
         n_components   = pc2.slider("最大主成分數", 2, min(15, len(numeric_options)-1), 5)
         alpha_pca      = pc3.select_slider("Hotelling T² 顯著水準 α",
                                             [0.01, 0.05, 0.10], value=0.05)
 
+        remaining = [c for c in numeric_options if c not in excl_cols]
+        pc1.caption(f"剩餘納入 PCA 的欄位：{len(remaining)} 個")
+
     if st.button("🧩 執行 PCA", key="run_pca"):
         try:
-            exclude   = [c for c in ["BatchID", target_col_pca] if c in work_df.columns]
+            exclude   = ["BatchID"] + excl_cols
             X_pca     = work_df.drop(columns=exclude, errors="ignore").select_dtypes(include=["number"]).dropna(axis=1)
             if X_pca.shape[1] < 2:
                 st.error("有效欄位不足 2 個。"); return
@@ -112,7 +126,7 @@ def render(selected_process_df):
             tf = topfeat.copy()
             tf["feature_name"] = tf["feature"].apply(
                 lambda x: feat_names[int(x)] if str(x).isdigit() and int(x) < len(feat_names) else str(x))
-            st.dataframe(tf, use_container_width=True, hide_index=True)
+            st.dataframe(tf, width="stretch", hide_index=True)
 
     with subtabs[2]:
         st.markdown("#### Hotelling T² — 各 Batch 異常程度")
@@ -155,7 +169,7 @@ def render(selected_process_df):
             lambda v: "🔴 >99%" if v>thres_99 else "🟠 >95%" if v>thres_95
             else "🟡 >68%" if v>thres_68 else "🟢 Normal")
         st.dataframe(ht2_df.sort_values("T²", ascending=False).reset_index(drop=True),
-                     use_container_width=True, hide_index=True)
+                     width="stretch", hide_index=True)
 
     with subtabs[3]:
         st.markdown("#### 選擇要分析的 Batch")
@@ -180,7 +194,7 @@ def render(selected_process_df):
             ax.set_title(f"Total T² Contribution — {sel_batch}", fontsize=13)
             ax.invert_yaxis(); ax.grid(axis="x", linestyle="--", alpha=0.5)
             plt.tight_layout(); st.pyplot(fig); plt.close()
-            st.dataframe(df_c, use_container_width=True, hide_index=True)
+            st.dataframe(df_c, width="stretch", hide_index=True)
             # PC decomposition
             t2_per_pc = (scores[sample_i,:]**2)/ev
             fig2, ax2 = plt.subplots(figsize=(8,4))
@@ -204,4 +218,4 @@ def render(selected_process_df):
             ax.set_title(f"PC{sel_pc+1} Contribution — {sel_batch}", fontsize=13)
             ax.invert_yaxis(); ax.grid(axis="x", linestyle="--", alpha=0.5)
             plt.tight_layout(); st.pyplot(fig); plt.close()
-            st.dataframe(df_pc, use_container_width=True, hide_index=True)
+            st.dataframe(df_pc, width="stretch", hide_index=True)
