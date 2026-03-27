@@ -184,8 +184,14 @@ with st.sidebar:
             selected_process = " + ".join(selected_steps)
 
         # 偵測步驟變更 → 清除 clean_df 避免舊特徵殘留
-        if set(selected_steps) != set(prev_steps):
+        # 【重要】只有在「使用者真的換了步驟」時才清除（prev_steps 非空才比對），
+        # 避免 feature eng rerun 後 prev_steps 仍為空而誤清剛存好的 clean_df
+        if prev_steps and set(selected_steps) != set(prev_steps):
             st.session_state["clean_df"] = None
+            st.session_state["fe_auto_result"]      = None
+            st.session_state["fe_stat_result"]      = None
+            st.session_state["fe_minmax_ba_result"] = None
+            st.session_state["df_before_step2"]     = None
         
         # 更新 session state
         st.session_state["selected_steps"] = selected_steps
