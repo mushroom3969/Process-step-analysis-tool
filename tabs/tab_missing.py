@@ -14,8 +14,7 @@ from utils import missing_col
 
 def render(selected_process_df):
     st.header("缺失值分析")
-    _cd = st.session_state.get("clean_df")
-    work_df = _cd if _cd is not None else selected_process_df
+    work_df = selected_process_df   # app.py 已統一傳入 active_df（clean_df 優先）
 
     if work_df is None:
         st.info("請先在側欄選擇製程步驟，或執行特徵工程。")
