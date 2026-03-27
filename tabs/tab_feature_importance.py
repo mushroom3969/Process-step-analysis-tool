@@ -220,25 +220,6 @@ def _render_shap_tab(fi_subtab, X_fi, y_fi, top_n_fi):
             _wrap_tick_labels(ax, ax.get_yticklabels, reverse_map)
             plt.subplots_adjust(left=0.38)
 
-        # ── FXX 代碼對照表（固定顯示在所有 subtab 上方）────────────────
-        with st.expander("📋 FXX 代碼對照表（點此展開）", expanded=False):
-            lookup_df = pd.DataFrame([
-                {"代碼": code, "原始欄位名稱": name}
-                for code, name in sorted(reverse_map.items())
-            ])
-            search_code = st.text_input(
-                "🔍 搜尋代碼或欄位名稱",
-                placeholder="輸入 F05 或欄位關鍵字...",
-                key="shap_lookup_search",
-            )
-            if search_code.strip():
-                q = search_code.strip().lower()
-                lookup_df = lookup_df[
-                    lookup_df["代碼"].str.lower().str.contains(q) |
-                    lookup_df["原始欄位名稱"].str.lower().str.contains(q)
-                ]
-            st.dataframe(lookup_df, use_container_width=True, hide_index=True)
-
         with shap_subtabs[0]:
             plt.figure(figsize=(11, max(6, top_n_fi*0.55)))
             shap_lib.summary_plot(shap_arr, X_short, max_display=top_n_fi,
@@ -302,44 +283,156 @@ def _render_shap_tab(fi_subtab, X_fi, y_fi, top_n_fi):
             plt.close()
 
         with shap_subtabs[4]:
-            st.markdown("#### SHAP Interaction Strength Ranking")
-            st.caption("基於 SHAP 值拆解出的兩兩特徵交互貢獻度。這比相關係數更能反映模型內部的真實邏輯。")
-            
-            # 💡 注意：完整計算 Interaction Values 非常耗時，這裡我們使用 SHAP 內建的近似權重排名
-            try:
-                # 取得特徵名稱映射
-                short_map = {c: f"F{i:02d}" for i, c in enumerate(X_fi.columns)}
-                reverse_map = {v: k for k, v in short_map.items()}
-                
-                # 計算交互作用強度 (這裡使用平均絕對差值作為指標)
-                # 我們從依賴圖的邏輯中提取交互貢獻
-                shap_arr = np.array(st.session_state["shap_vals"])
-                
-                # 簡單化排名：計算兩兩特徵在 SHAP 空間中的耦合度
-                # 這裡展示前 10 名最強組合
-                st.info("正在分析特徵間的非線性耦合強度...", icon="🧠")
-                
-                # 為了效能，我們從 Top 特徵中尋找
-                top_feats = st.session_state["fi_perm_df"]["Feature"].head(10).tolist()
-                interaction_list = []
-                
-                for i in range(len(top_feats)):
-                    for j in range(i + 1, len(top_feats)):
-                        f1, f2 = top_feats[i], top_feats[j]
-                        # 這裡使用一個啟發式估計：
-                        # 在固定 f1 時，f2 對 f1 SHAP 值解釋能力的貢獻
-                        # 實務上我們會用 std(SHAP_f1 | f2_bins)
-                        # 為簡化 Streamlit 運行，我們呈現剛才計算的綜合排名，但標示為 SHAP 導向
-                        interaction_list.append({
-                            "交互組合": f"{f1} ↔ {f2}",
-                            "SHAP 耦合指數": np.random.uniform(0.1, 0.5) # 這裡建議替換為實際矩陣計算
-                        })
-                
-                inter_df = pd.DataFrame(interaction_list).sort_values("SHAP 耦合指數", ascending=False)
-                st.dataframe(inter_df.head(10), use_container_width=True)
+            st.markdown("#### 🔄 SHAP Interaction Matrix")
+            st.caption(
+                "以 `std(SHAP_fi | bins of fj)` 估計兩兩特徵間的非線性交互強度。"
+                "欄位名稱使用 FXX 代號，對照請見上方對照表。"
+            )
 
-            except Exception as e:
-                st.warning(f"交互排名計算受限：{e}")
+            # ── 設定 ────────────────────────────────────────────────
+            im_c1, im_c2 = st.columns(2)
+            top_n_inter = im_c1.slider(
+                "納入計算的 Top 特徵數（依 RF 重要性）",
+                5, min(30, X_fi.shape[1]), 15, key="inter_top_n"
+            )
+            n_bins_inter = im_c2.slider("分箱數（bins）", 2, 10, 4, key="inter_bins")
+
+            cmap_inter = im_c1.selectbox(
+                "色圖", ["YlOrRd", "Reds", "plasma", "hot_r", "viridis"],
+                key="inter_cmap"
+            )
+            annot_inter = im_c2.checkbox("顯示數值標注", value=True, key="inter_annot")
+
+            if st.button("🧮 計算 Interaction Matrix", key="run_inter_matrix", type="primary"):
+                perm_df = st.session_state.get("fi_perm_df")
+                if perm_df is None:
+                    st.error("請先在「RF 重要性」分頁訓練 RF 模型。")
+                else:
+                    with st.spinner("計算 SHAP 交互矩陣中..."):
+                        try:
+                            shap_arr_im = np.array(st.session_state["shap_vals"])
+                            # 取 Top N 特徵（依 RF permutation importance）
+                            top_feats = perm_df["Feature"].head(top_n_inter).tolist()
+                            feat_indices = [list(X_fi.columns).index(f) for f in top_feats]
+                            n = len(top_feats)
+
+                            # 建立 n×n 矩陣：entry(i,j) = std of SHAP_i grouped by bins of fj
+                            inter_matrix = np.zeros((n, n))
+                            for ii, fi_idx in enumerate(feat_indices):
+                                shap_fi = shap_arr_im[:, fi_idx]  # SHAP values of feature i
+                                for jj, fj_idx in enumerate(feat_indices):
+                                    if ii == jj:
+                                        inter_matrix[ii, jj] = 0.0
+                                        continue
+                                    fj_vals = X_fi.iloc[:, fj_idx].values.astype(float)
+                                    valid = ~np.isnan(fj_vals)
+                                    if valid.sum() < n_bins_inter * 2:
+                                        inter_matrix[ii, jj] = 0.0
+                                        continue
+                                    # Bin fj into quantile-based groups
+                                    try:
+                                        quantiles = np.percentile(
+                                            fj_vals[valid],
+                                            np.linspace(0, 100, n_bins_inter + 1)
+                                        )
+                                        quantiles = np.unique(quantiles)
+                                        if len(quantiles) < 2:
+                                            inter_matrix[ii, jj] = 0.0
+                                            continue
+                                        bin_means = []
+                                        for b in range(len(quantiles) - 1):
+                                            lo, hi = quantiles[b], quantiles[b + 1]
+                                            mask = (fj_vals >= lo) & (fj_vals <= hi) & valid
+                                            if mask.sum() > 0:
+                                                bin_means.append(shap_fi[mask].mean())
+                                        inter_matrix[ii, jj] = (
+                                            float(np.std(bin_means)) if len(bin_means) > 1 else 0.0
+                                        )
+                                    except Exception:
+                                        inter_matrix[ii, jj] = 0.0
+
+                            # 用 FXX 代號作為標籤
+                            short_map_im = {c: f"F{i:02d}" for i, c in enumerate(X_fi.columns)}
+                            labels_im = [short_map_im[f] for f in top_feats]
+
+                            st.session_state["inter_matrix"]   = inter_matrix
+                            st.session_state["inter_labels"]   = labels_im
+                            st.session_state["inter_top_feats"] = top_feats
+                        except Exception as e:
+                            st.error(f"計算失敗：{e}")
+                            import traceback; st.code(traceback.format_exc())
+
+            # ── 顯示矩陣 ────────────────────────────────────────────
+            if st.session_state.get("inter_matrix") is not None:
+                inter_matrix   = st.session_state["inter_matrix"]
+                labels_im      = st.session_state["inter_labels"]
+                top_feats      = st.session_state["inter_top_feats"]
+                n              = len(labels_im)
+
+                # 動態調整圖尺寸與字體
+                cell_size  = max(0.55, min(1.1, 14.0 / n))
+                fig_side   = max(7, n * cell_size)
+                annot_fs   = max(6, min(10, int(80 / n)))
+                tick_fs    = max(7, min(11, int(90 / n)))
+
+                fig, ax = plt.subplots(figsize=(fig_side + 1.5, fig_side))
+                im_df = pd.DataFrame(inter_matrix, index=labels_im, columns=labels_im)
+
+                sns.heatmap(
+                    im_df,
+                    ax=ax,
+                    cmap=cmap_inter,
+                    annot=annot_inter,
+                    fmt=".3f" if annot_inter else "",
+                    annot_kws={"size": annot_fs},
+                    linewidths=0.4,
+                    linecolor="white",
+                    cbar_kws={"label": "Interaction Strength (std of SHAP_i | bins of fj)", "shrink": 0.75},
+                    square=True,
+                )
+                ax.set_title(
+                    f"SHAP Interaction Matrix  (Top {n} features, bins={n_bins_inter})",
+                    fontsize=12, pad=14,
+                )
+                ax.set_xlabel("fj  (conditioning feature)", fontsize=10)
+                ax.set_ylabel("fi  (target SHAP)", fontsize=10)
+                ax.tick_params(axis="x", labelsize=tick_fs, rotation=45)
+                ax.tick_params(axis="y", labelsize=tick_fs, rotation=0)
+                plt.tight_layout()
+                st.pyplot(fig)
+                plt.close()
+
+                # ── 排行榜（上三角展開）─────────────────────────────
+                st.markdown("#### 📊 交互強度排行榜 Top 15")
+                rows_rank = []
+                for ii in range(n):
+                    for jj in range(n):
+                        if ii == jj:
+                            continue
+                        rows_rank.append({
+                            "fi（SHAP 受影響）": labels_im[ii],
+                            "fj（條件特徵）":    labels_im[jj],
+                            "fi 原始名稱":       top_feats[ii],
+                            "fj 原始名稱":       top_feats[jj],
+                            "Interaction Strength": round(float(inter_matrix[ii, jj]), 4),
+                        })
+                rank_df = (
+                    pd.DataFrame(rows_rank)
+                    .sort_values("Interaction Strength", ascending=False)
+                    .reset_index(drop=True)
+                    .head(15)
+                )
+                st.dataframe(
+                    rank_df.style.background_gradient(
+                        cmap="YlOrRd", subset=["Interaction Strength"]
+                    ),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+                st.caption(
+                    "解讀：Interaction Strength 越大，代表「當 fj 改變時，fi 的 SHAP 值波動越大」，"
+                    "即兩特徵存在較強的非線性交互效應。"
+                )
 
 
 # ═══════════════════════════════════════════════════════════
