@@ -131,23 +131,31 @@ with st.sidebar:
     uploaded_file = st.file_uploader("上傳 CSV 資料檔", type=["csv"])
     
     if uploaded_file:
-        try:
-            raw_df = pd.read_csv(uploaded_file)
-            batch_candidates = [c for c in raw_df.columns if "BatchID" in c]
-            if batch_candidates:
-                raw_df = raw_df.rename(columns={batch_candidates[0]: "BatchID"})
-            
-            non_batch = raw_df.columns.difference(["BatchID"])
-            raw_df[non_batch] = raw_df[non_batch].apply(pd.to_numeric, errors="coerce")
-            
-            st.session_state["raw_df"] = raw_df
-            st.session_state["dfs_dict"] = split_process_df(raw_df)
-            st.session_state["selected_steps"] = []
-            st.session_state["selected_process_df"] = None
-            st.session_state["clean_df"] = None
-            st.success(f"載入成功！{raw_df.shape[0]} 筆 × {raw_df.shape[1]} 欄")
-        except Exception as e:
-            st.error(f"載入失敗：{e}")
+        # 用檔案 id 判斷是否為「新上傳」，避免每次 rerun 都誤清 clean_df
+        file_id = uploaded_file.file_id
+        if st.session_state.get("_last_file_id") != file_id:
+            st.session_state["_last_file_id"] = file_id
+            try:
+                raw_df = pd.read_csv(uploaded_file)
+                batch_candidates = [c for c in raw_df.columns if "BatchID" in c]
+                if batch_candidates:
+                    raw_df = raw_df.rename(columns={batch_candidates[0]: "BatchID"})
+                
+                non_batch = raw_df.columns.difference(["BatchID"])
+                raw_df[non_batch] = raw_df[non_batch].apply(pd.to_numeric, errors="coerce")
+                
+                st.session_state["raw_df"] = raw_df
+                st.session_state["dfs_dict"] = split_process_df(raw_df)
+                st.session_state["selected_steps"] = []
+                st.session_state["selected_process_df"] = None
+                st.session_state["clean_df"] = None
+                st.session_state["fe_auto_result"]      = None
+                st.session_state["fe_stat_result"]      = None
+                st.session_state["fe_minmax_ba_result"] = None
+                st.session_state["df_before_step2"]     = None
+                st.success(f"載入成功！{raw_df.shape[0]} 筆 × {raw_df.shape[1]} 欄")
+            except Exception as e:
+                st.error(f"載入失敗：{e}")
 
     # ── 製程步驟選擇 ──────────────────────────────────────────
     st.markdown("---")
@@ -184,14 +192,8 @@ with st.sidebar:
             selected_process = " + ".join(selected_steps)
 
         # 偵測步驟變更 → 清除 clean_df 避免舊特徵殘留
-        # 【重要】只有在「使用者真的換了步驟」時才清除（prev_steps 非空才比對），
-        # 避免 feature eng rerun 後 prev_steps 仍為空而誤清剛存好的 clean_df
-        if prev_steps and set(selected_steps) != set(prev_steps):
+        if set(selected_steps) != set(prev_steps):
             st.session_state["clean_df"] = None
-            st.session_state["fe_auto_result"]      = None
-            st.session_state["fe_stat_result"]      = None
-            st.session_state["fe_minmax_ba_result"] = None
-            st.session_state["df_before_step2"]     = None
         
         # 更新 session state
         st.session_state["selected_steps"] = selected_steps
