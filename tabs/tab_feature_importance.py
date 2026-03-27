@@ -466,14 +466,33 @@ def _render_shap_tab(fi_subtab, X_fi, y_fi, top_n_fi):
             if st.button("🎯 計算精確 SHAP Interaction Values", key="run_sv_inter", type="primary"):
                 rf_model = st.session_state.get("fi_rf")
                 perm_df  = st.session_state.get("fi_perm_df")
-                if rf_model is None or perm_df is None:
-                    st.error("請先在「RF 重要性」分頁訓練 RF 模型。")
-                else:
-                    top_feats_sv = perm_df["Feature"].head(top_n_sv).tolist()
-                    feat_idx_sv  = [list(X_fi.columns).index(f) for f in top_feats_sv]
-                    X_sv = X_fi[top_feats_sv]
 
-                    with st.spinner(f"計算 SHAP Interaction Values（{top_n_sv} 個特徵）... 請稍候"):
+                # ── 前置檢查，給出明確原因 ────────────────────────
+                _sv_ready = True
+                if rf_model is None:
+                    st.error("❌ 尚未訓練 RF 模型，請先至「🌲 RF 重要性」分頁點擊「訓練 Random Forest」。")
+                    _sv_ready = False
+                if perm_df is None:
+                    st.error("❌ 找不到特徵重要性資料，請先執行 RF 訓練。")
+                    _sv_ready = False
+
+                if _sv_ready:
+                    top_feats_sv = perm_df["Feature"].head(top_n_sv).tolist()
+                    X_sv = X_fi[top_feats_sv]
+                    n_samples_sv = X_sv.shape[0]
+                    n_feats_sv   = X_sv.shape[1]
+
+                    # ── 算力預估警告 ──────────────────────────────
+                    estimated_sec = (n_samples_sv * n_feats_sv ** 2) / 5000
+                    if estimated_sec > 60:
+                        st.warning(
+                            f"⚠️ 預估計算時間約 **{estimated_sec:.0f} 秒**（{n_samples_sv} 筆 × {n_feats_sv} 特徵）。"
+                            f"建議將「Top 特徵數」降至 8～10 以內再執行。"
+                        )
+                    else:
+                        st.info(f"ℹ️ 預估計算時間約 {max(1, estimated_sec):.0f} 秒，請稍候。")
+
+                    with st.spinner(f"計算中：{n_samples_sv} 筆 × {n_feats_sv} 特徵 × {n_feats_sv} 特徵..."):
                         try:
                             import shap as shap_lib_sv
                             explainer_sv = shap_lib_sv.TreeExplainer(rf_model)
@@ -481,25 +500,50 @@ def _render_shap_tab(fi_subtab, X_fi, y_fi, top_n_fi):
                             sv_interact  = explainer_sv.shap_interaction_values(X_sv)
                             sv_arr       = np.array(sv_interact)  # (n, p, p)
 
-                            # 取平均絕對值：shape (p, p)
-                            mean_abs_sv  = np.mean(np.abs(sv_arr), axis=0)
+                            if sv_arr.ndim != 3:
+                                st.error(
+                                    f"❌ shap_interaction_values 回傳維度異常（shape={sv_arr.shape}）。"
+                                    "可能是多輸出模型，目前僅支援單一輸出的 RandomForest。"
+                                )
+                            else:
+                                # 取平均絕對值：shape (p, p)
+                                mean_abs_sv = np.mean(np.abs(sv_arr), axis=0)
 
-                            if symm_sv:
-                                mean_abs_sv = (mean_abs_sv + mean_abs_sv.T) / 2
+                                if symm_sv:
+                                    mean_abs_sv = (mean_abs_sv + mean_abs_sv.T) / 2
 
-                            # 對角線設為 0（self-interaction 沒有交互意義）
-                            np.fill_diagonal(mean_abs_sv, 0)
+                                # 對角線設為 0（self-interaction 無意義）
+                                np.fill_diagonal(mean_abs_sv, 0)
 
-                            short_map_sv = {c: f"F{i:02d}" for i, c in enumerate(X_fi.columns)}
-                            labels_sv    = [short_map_sv[f] for f in top_feats_sv]
+                                short_map_sv = {col: f"F{i:02d}" for i, col in enumerate(X_fi.columns)}
+                                labels_sv    = [short_map_sv[f] for f in top_feats_sv]
 
-                            st.session_state["sv_interact_mat"]    = mean_abs_sv
-                            st.session_state["sv_interact_labels"] = labels_sv
-                            st.session_state["sv_interact_feats"]  = top_feats_sv
-                            st.success("✅ 精確版計算完成！")
+                                st.session_state["sv_interact_mat"]    = mean_abs_sv
+                                st.session_state["sv_interact_labels"] = labels_sv
+                                st.session_state["sv_interact_feats"]  = top_feats_sv
+                                st.success(f"✅ 計算完成！（{n_samples_sv} 筆 × {n_feats_sv} 特徵）")
+
+                        except MemoryError:
+                            st.error(
+                                "❌ 記憶體不足（MemoryError）。請降低「Top 特徵數」或減少樣本數後重試。"
+                            )
                         except Exception as e:
-                            st.error(f"計算失敗：{e}")
-                            import traceback; st.code(traceback.format_exc())
+                            err_msg = str(e)
+                            # 給出更友善的錯誤說明
+                            if "timeout" in err_msg.lower() or "time" in err_msg.lower():
+                                st.error("❌ 計算逾時，請降低特徵數後重試。")
+                            elif "memory" in err_msg.lower() or "alloc" in err_msg.lower():
+                                st.error("❌ 記憶體不足，請降低特徵數或樣本數後重試。")
+                            elif "tree" in err_msg.lower() or "model" in err_msg.lower():
+                                st.error(
+                                    f"❌ 模型不相容：{err_msg}\n"
+                                    "shap_interaction_values 僅支援 Tree 系列模型（如 RandomForest）。"
+                                )
+                            else:
+                                st.error(f"❌ 計算失敗：{err_msg}")
+                            import traceback
+                            with st.expander("🔍 查看完整錯誤訊息"):
+                                st.code(traceback.format_exc())
 
             # ── 顯示精確版矩陣 ───────────────────────────────────
             if st.session_state.get("sv_interact_mat") is not None:
