@@ -44,26 +44,72 @@ def clean_process_features_with_log(
     def _clean_col_name(name: str) -> str:
         return re.sub(r"\s?\(.*\)$", "", name).strip()
 
-    # ── Rule B: 配對差值 ──────────────────────────────────────
-    pairs = [
-        (["Maximum", "Maximun"], ["Minimum", "Minimun"], "Diff_MaxMin"),
-        (["After"], ["Before"], "Diff_AfterBefore"),
-        (["End"], ["Start"], "Diff_EndStart"),
-    ]
-    current_cols = new_df.columns.tolist()
-    for high_keys, low_keys, suffix in pairs:
-        for k_high in high_keys:
-            for k_low in low_keys:
-                high_cols = [c for c in current_cols if k_high in c]
-                for c_h in high_cols:
-                    base_h = _clean_col_name(c_h).replace(k_high, "")
-                    for c_l in current_cols:
-                        if k_low in c_l:
-                            base_l = _clean_col_name(c_l).replace(k_low, "")
-                            if base_h == base_l and c_h != c_l:
-                                new_col = f"{base_h.strip('_')}_{suffix}"
-                                if new_col not in new_df.columns:
-                                    new_df[new_col] = new_df[c_h] - new_df[c_l]
+    # ── Rule B: Min/Max → mean + range；Before/After、Start/End → diff ────
+    MIN_ALIASES = {"min", "minimum", "minimun", "low", "lower", "lo"}
+    MAX_ALIASES = {"max", "maximum", "maximun", "high", "upper", "hi"}
+    BEF_ALIASES = {"before", "bef", "bf", "pre", "initial", "init", "start"}
+    AFT_ALIASES = {"after", "aft", "af", "post", "final", "fin", "end"}
+
+    def _find_kw(name: str, aliases: set):
+        n = name.lower()
+        for kw in sorted(aliases, key=len, reverse=True):
+            pattern = r"(?<![a-z0-9])" + re.escape(kw) + r"(?![a-z0-9])"
+            if re.search(pattern, n):
+                return kw
+        return None
+
+    def _base(col: str, kw: str) -> str:
+        n = col.lower()
+        pattern = r"(?<![a-z0-9])" + re.escape(kw) + r"(?![a-z0-9])"
+        return re.sub(pattern, "", n).strip("_- ")
+
+    current_cols = list(new_df.columns)
+    min_map, max_map, bef_map, aft_map = {}, {}, {}, {}
+
+    for col in current_cols:
+        if col in whitelist:
+            continue
+        kw = _find_kw(col, MIN_ALIASES)
+        if kw:
+            b = _base(col, kw)
+            min_map.setdefault(b, col)
+            continue
+        kw = _find_kw(col, MAX_ALIASES)
+        if kw:
+            b = _base(col, kw)
+            max_map.setdefault(b, col)
+            continue
+        kw = _find_kw(col, BEF_ALIASES)
+        if kw:
+            b = _base(col, kw)
+            bef_map.setdefault(b, col)
+            continue
+        kw = _find_kw(col, AFT_ALIASES)
+        if kw:
+            b = _base(col, kw)
+            aft_map.setdefault(b, col)
+
+    # Min/Max → mean + range
+    for b in sorted(set(min_map) & set(max_map)):
+        c_min, c_max = min_map[b], max_map[b]
+        label = b.strip("_- ") or f"{c_min}_{c_max}"
+        mean_col  = f"{label}_mean"
+        range_col = f"{label}_range"
+        new_df[mean_col]  = (new_df[c_min] + new_df[c_max]) / 2
+        new_df[range_col] = new_df[c_max] - new_df[c_min]
+        drop_log.append({"Column": c_min, "Reason": f"Merged into {mean_col}, {range_col}"})
+        drop_log.append({"Column": c_max, "Reason": f"Merged into {mean_col}, {range_col}"})
+        new_df = new_df.drop(columns=[c_min, c_max])
+
+    # Before/After、Start/End → diff (after/end − before/start)
+    for b in sorted(set(bef_map) & set(aft_map)):
+        c_bef, c_aft = bef_map[b], aft_map[b]
+        label = b.strip("_- ") or f"{c_bef}_{c_aft}"
+        diff_col = f"{label}_diff"
+        new_df[diff_col] = new_df[c_aft] - new_df[c_bef]
+        drop_log.append({"Column": c_bef, "Reason": f"Merged into {diff_col}"})
+        drop_log.append({"Column": c_aft, "Reason": f"Merged into {diff_col}"})
+        new_df = new_df.drop(columns=[c_bef, c_aft])
 
     # ── Rule C: 數字編號欄位 → 取平均 ─────────────────────────
     pattern = r"^(.*)_(\d+)\s?(\(.*\))$"
