@@ -256,7 +256,7 @@ with tabs[1]:
     tab_overview.render(raw_df, dfs_dict, selected_process_df, selected_process)
 
 with tabs[2]:
-    tab_trend.render(selected_process_df)
+    tab_trend.render(active_df)
 
 with tabs[3]:
     tab_feature_eng.render(selected_process_df)
