@@ -133,8 +133,8 @@ def render(selected_process_df):
             "pca_spe":         spe_vals,
             "pca_ht2_thres":   ht2_thres,
             "pca_spe_thres":   spe_thres,
-            "pca_n_comp":      n_comp,
-            "pca_alpha":       alpha_pca,
+            "pca_n_comp_val":  n_comp,
+            "pca_alpha_val":   alpha_pca,
         })
         st.success(f"✅ PCA 完成！保留 {n_comp} 個主成分，累計解釋 {cumulative_ev[n_comp-1]*100:.1f}%")
 
@@ -154,8 +154,8 @@ def render(selected_process_df):
     spe_vals    = st.session_state["pca_spe"]
     ht2_thres   = st.session_state["pca_ht2_thres"]
     spe_thres   = st.session_state["pca_spe_thres"]
-    n_comp      = st.session_state["pca_n_comp"]
-    alpha_val   = st.session_state["pca_alpha"]
+    n_comp      = st.session_state["pca_n_comp_val"]
+    alpha_val   = st.session_state["pca_alpha_val"]
     n_obs       = X_scaled.shape[0]
 
     # ── 摘要 metrics ──────────────────────────────────────────
