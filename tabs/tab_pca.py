@@ -69,8 +69,12 @@ def render(selected_process_df):
             default=default_excl,
             key="pca_excl",
         )
-        max_comp = max(2, min(15, len(numeric_options) - len(excl_cols) - 1))
-        n_components = pc2.slider("最大主成分數", 2, max_comp, min(5, max_comp), key="pca_n_comp")
+        max_comp = max(3, min(15, len(numeric_options) - len(excl_cols) - 1))
+        if max_comp <= 2:
+            pc2.warning("欄位數不足，無法調整主成分數。")
+            n_components = 2
+        else:
+            n_components = pc2.slider("最大主成分數", 2, max_comp, min(5, max_comp), key="pca_n_comp")
         alpha_pca = pc3.select_slider("顯著水準 α", [0.01, 0.05, 0.10], value=0.05, key="pca_alpha")
 
         feat_cols = [c for c in numeric_options if c not in excl_cols]
