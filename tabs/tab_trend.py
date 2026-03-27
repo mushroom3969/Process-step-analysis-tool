@@ -487,6 +487,10 @@ def _render_xyz_scatter(work_df: pd.DataFrame, non_batch: list):
     show_colorbar  = opt_c3.checkbox("顯示色條（漸層模式）", value=True, key="xyz_colorbar")
     dot_size       = opt_c4.slider("點大小", 20, 200, 60, 10, key="xyz_dotsize")
 
+    stat_c1, stat_c2 = st.columns(2)
+    show_mean_xyz  = stat_c1.checkbox("顯示 Mean 線（Y 軸）", value=True, key="xyz_show_mean")
+    show_sigma_xyz = stat_c2.checkbox("顯示 ±1σ 色帶（Y 軸）", value=True, key="xyz_show_sigma")
+
     # ── 繪圖按鈕 ──────────────────────────────────────────────
     if st.button("🎨 繪製 XYZ 散佈圖", key="run_xyz", type="primary"):
 
@@ -579,13 +583,58 @@ def _render_xyz_scatter(work_df: pd.DataFrame, non_batch: list):
             legend_handles.append(
                 mpatches.Patch(color="#aaaaaa", label="Outside Zones")
             )
-            ax.legend(
-                handles=legend_handles,
-                title=f"Z: {z_sel[:30]}",
-                fontsize=8, title_fontsize=8,
-                loc="upper left", framealpha=0.85,
-                ncol=max(1, len(zones_xyz) // 5 + 1),
-            )
+            # legend drawn after mean lines below
+
+        # ── Mean 線 & ±1σ 色帶（Y 軸）────────────────────────────
+        if use_z and color_mode == "🎨 分區著色（手動設定區間）" and zones_xyz:
+            # 每個分區各自的 mean / sigma
+            for z in zones_xyz:
+                mask_z = np.array([z["min"] <= v <= z["max"] for v in z_plot])
+                y_z = y_plot[mask_z]
+                y_z = y_z[~np.isnan(y_z)]
+                if len(y_z) < 1:
+                    continue
+                mu_z  = float(np.mean(y_z))
+                sig_z = float(np.std(y_z, ddof=1)) if len(y_z) > 1 else 0.0
+                if show_sigma_xyz and sig_z > 0:
+                    ax.axhspan(mu_z - sig_z, mu_z + sig_z,
+                               alpha=0.07, color=z["color"], zorder=0)
+                if show_mean_xyz:
+                    ax.axhline(mu_z, color=z["color"], linewidth=1.3,
+                               linestyle="--", alpha=0.85, zorder=2,
+                               label=f"{z['label']} μ={mu_z:.3f}")
+            # Zone legend: patches + mean line labels combined
+            all_handles = legend_handles + ([
+                mpatches.Patch(color="#aaaaaa", label="Outside Zones")
+            ] if any(
+                not any(z["min"] <= v <= z["max"] for z in zones_xyz)
+                for v in z_plot if not np.isnan(v)
+            ) else [])
+            if show_mean_xyz:
+                ax.legend(loc="upper left", fontsize=7.5, framealpha=0.85,
+                          title=f"Z: {z_sel[:25]}", title_fontsize=8,
+                          ncol=max(1, len(zones_xyz) // 5 + 1))
+            else:
+                ax.legend(handles=all_handles, title=f"Z: {z_sel[:25]}",
+                          fontsize=7.5, title_fontsize=8,
+                          loc="upper left", framealpha=0.85,
+                          ncol=max(1, len(zones_xyz) // 5 + 1))
+        else:
+            # 全體 Y 的 mean / sigma
+            y_clean = y_plot[~np.isnan(y_plot)]
+            if len(y_clean) >= 1:
+                mu_all  = float(np.mean(y_clean))
+                sig_all = float(np.std(y_clean, ddof=1)) if len(y_clean) > 1 else 0.0
+                if show_sigma_xyz and sig_all > 0:
+                    ax.axhspan(mu_all - sig_all, mu_all + sig_all,
+                               alpha=0.08, color="#2e86ab", zorder=0,
+                               label=f"±1σ ({mu_all - sig_all:.3f} ~ {mu_all + sig_all:.3f})")
+                if show_mean_xyz:
+                    ax.axhline(mu_all, color="#2e86ab", linewidth=1.3,
+                               linestyle="--", alpha=0.85, zorder=2,
+                               label=f"μ={mu_all:.4f}")
+            if show_mean_xyz or show_sigma_xyz:
+                ax.legend(fontsize=7.5, loc="upper left", framealpha=0.85)
 
         # Batch 標籤
         if show_batch_lbl and has_batch:
