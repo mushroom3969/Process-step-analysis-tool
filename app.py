@@ -225,6 +225,11 @@ selected_process_df = st.session_state.get("selected_process_df")
 selected_process = st.session_state.get("selected_process", "")
 selected_steps = st.session_state.get("selected_steps", [])
 
+# ── active_df：優先使用特徵工程後的 clean_df，否則用原始 selected_process_df ──
+# 這確保 feature eng → missing → correlation → pca 等所有下游 tab 都拿到同一份資料
+_clean = st.session_state.get("clean_df")
+active_df = _clean if _clean is not None else selected_process_df
+
 # 標題列顯示當前步驟 badges
 if selected_steps:
     badges = "".join(f'<span class="step-badge">{s}</span>' for s in selected_steps)
@@ -257,19 +262,19 @@ with tabs[3]:
     tab_feature_eng.render(selected_process_df)
 
 with tabs[4]:
-    tab_missing.render(selected_process_df)
+    tab_missing.render(active_df)
 
 with tabs[5]:
-    tab_correlation.render(selected_process_df)
+    tab_correlation.render(active_df)
 
 with tabs[6]:
-    tab_pca.render(selected_process_df)
+    tab_pca.render(active_df)
 
 with tabs[7]:
-    tab_feature_importance.render(selected_process_df)
+    tab_feature_importance.render(active_df)
 
 with tabs[8]:
-    tab_stat_test.render(selected_process_df)
+    tab_stat_test.render(active_df)
 
 with tabs[9]:
     tab_literature.render()
