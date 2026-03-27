@@ -154,8 +154,8 @@ def render(selected_process_df):
     spe_vals    = st.session_state["pca_spe"]
     ht2_thres   = st.session_state["pca_ht2_thres"]
     spe_thres   = st.session_state["pca_spe_thres"]
-    n_comp      = st.session_state["pca_n_comp_val"]
-    alpha_val   = st.session_state["pca_alpha_val"]
+    n_comp      = st.session_state.get("pca_n_comp_val", st.session_state.get("pca_n_comp", 5))
+    alpha_val   = st.session_state.get("pca_alpha_val", st.session_state.get("pca_alpha", 0.05))
     n_obs       = X_scaled.shape[0]
 
     # ── 摘要 metrics ──────────────────────────────────────────
