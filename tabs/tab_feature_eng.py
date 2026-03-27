@@ -369,8 +369,8 @@ def _render_main(selected_process_df, show_mean: bool = True):
                 return name.lower()
 
             # ── 關鍵字別名 ──────────────────────────────────────
-            MIN_ALIASES  = {"min", "minimum", "low", "lower", "lo", "l"}
-            MAX_ALIASES  = {"max", "maximum", "high", "upper", "hi", "h"}
+            MIN_ALIASES  = {"min", "minimum", "minimun", "low", "lower", "lo", "l"}
+            MAX_ALIASES  = {"max", "maximum", "maximun", "high", "upper", "hi", "h"}
             BEF_ALIASES  = {"before", "bef", "bf", "pre", "initial", "init", "start"}
             AFT_ALIASES  = {"after",  "aft", "af", "post", "final", "fin", "end"}
 
