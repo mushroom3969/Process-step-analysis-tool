@@ -434,6 +434,153 @@ def _render_shap_tab(fi_subtab, X_fi, y_fi, top_n_fi):
                     "即兩特徵存在較強的非線性交互效應。"
                 )
 
+            # ══════════════════════════════════════════════════════
+            # ── 精確版：shap_interaction_values() ─────────────────
+            # ══════════════════════════════════════════════════════
+            st.markdown("---")
+            st.markdown("#### 🎯 精確版 SHAP Interaction Values")
+            st.info(
+                "**原理**：呼叫 `TreeExplainer.shap_interaction_values()`，"
+                "每個格子 (i,j) = 平均 |SHAP interaction value(i,j)|，"
+                "與 Dependence Plot 的 `interaction_index='auto'` 使用相同底層計算，結果最精確。\n\n"
+                "⚠️ **注意**：計算量為 O(n² × samples × trees)，特徵數或樣本數多時需要幾十秒。"
+                "建議先用 Top N 特徵縮小範圍。",
+                icon="ℹ️",
+            )
+
+            sv_c1, sv_c2 = st.columns(2)
+            top_n_sv = sv_c1.slider(
+                "Top 特徵數（精確版）", 5, min(25, X_fi.shape[1]), 10, key="sv_top_n"
+            )
+            cmap_sv   = sv_c2.selectbox(
+                "色圖", ["YlOrRd", "Reds", "plasma", "hot_r", "viridis"],
+                key="sv_cmap"
+            )
+            sv_c3, sv_c4 = st.columns(2)
+            annot_sv  = sv_c3.checkbox("顯示數值標注", value=True, key="sv_annot")
+            symm_sv   = sv_c4.checkbox(
+                "對稱化（取 (i,j)+(j,i) 平均）", value=True, key="sv_symm",
+                help="SHAP interaction matrix 理論上對稱，對稱化後更易閱讀。"
+            )
+
+            if st.button("🎯 計算精確 SHAP Interaction Values", key="run_sv_inter", type="primary"):
+                rf_model = st.session_state.get("fi_rf")
+                perm_df  = st.session_state.get("fi_perm_df")
+                if rf_model is None or perm_df is None:
+                    st.error("請先在「RF 重要性」分頁訓練 RF 模型。")
+                else:
+                    top_feats_sv = perm_df["Feature"].head(top_n_sv).tolist()
+                    feat_idx_sv  = [list(X_fi.columns).index(f) for f in top_feats_sv]
+                    X_sv = X_fi[top_feats_sv]
+
+                    with st.spinner(f"計算 SHAP Interaction Values（{top_n_sv} 個特徵）... 請稍候"):
+                        try:
+                            import shap as shap_lib_sv
+                            explainer_sv = shap_lib_sv.TreeExplainer(rf_model)
+                            # shape: (n_samples, n_features_sv, n_features_sv)
+                            sv_interact  = explainer_sv.shap_interaction_values(X_sv)
+                            sv_arr       = np.array(sv_interact)  # (n, p, p)
+
+                            # 取平均絕對值：shape (p, p)
+                            mean_abs_sv  = np.mean(np.abs(sv_arr), axis=0)
+
+                            if symm_sv:
+                                mean_abs_sv = (mean_abs_sv + mean_abs_sv.T) / 2
+
+                            # 對角線設為 0（self-interaction 沒有交互意義）
+                            np.fill_diagonal(mean_abs_sv, 0)
+
+                            short_map_sv = {c: f"F{i:02d}" for i, c in enumerate(X_fi.columns)}
+                            labels_sv    = [short_map_sv[f] for f in top_feats_sv]
+
+                            st.session_state["sv_interact_mat"]    = mean_abs_sv
+                            st.session_state["sv_interact_labels"] = labels_sv
+                            st.session_state["sv_interact_feats"]  = top_feats_sv
+                            st.success("✅ 精確版計算完成！")
+                        except Exception as e:
+                            st.error(f"計算失敗：{e}")
+                            import traceback; st.code(traceback.format_exc())
+
+            # ── 顯示精確版矩陣 ───────────────────────────────────
+            if st.session_state.get("sv_interact_mat") is not None:
+                mean_abs_sv  = st.session_state["sv_interact_mat"]
+                labels_sv    = st.session_state["sv_interact_labels"]
+                top_feats_sv = st.session_state["sv_interact_feats"]
+                n_sv = len(labels_sv)
+
+                # 動態圖尺寸與字體
+                cell_sv   = max(0.55, min(1.1, 14.0 / n_sv))
+                fig_sv    = max(7, n_sv * cell_sv)
+                annot_fs_sv = max(6, min(10, int(80 / n_sv)))
+                tick_fs_sv  = max(7, min(11, int(90 / n_sv)))
+
+                fig, ax = plt.subplots(figsize=(fig_sv + 1.5, fig_sv))
+                sv_df = pd.DataFrame(mean_abs_sv, index=labels_sv, columns=labels_sv)
+
+                sns.heatmap(
+                    sv_df,
+                    ax=ax,
+                    cmap=cmap_sv,
+                    annot=annot_sv,
+                    fmt=".4f" if annot_sv else "",
+                    annot_kws={"size": annot_fs_sv},
+                    linewidths=0.4,
+                    linecolor="white",
+                    cbar_kws={"label": "Mean |SHAP Interaction Value|", "shrink": 0.75},
+                    square=True,
+                )
+                ax.set_title(
+                    f"Exact SHAP Interaction Matrix  (Top {n_sv} features)",
+                    fontsize=12, pad=14,
+                )
+                ax.set_xlabel("Feature j", fontsize=10)
+                ax.set_ylabel("Feature i", fontsize=10)
+                ax.tick_params(axis="x", labelsize=tick_fs_sv, rotation=45)
+                ax.tick_params(axis="y", labelsize=tick_fs_sv, rotation=0)
+                plt.tight_layout()
+                st.pyplot(fig)
+                plt.close()
+
+                # ── 精確版排行榜（只取上三角，因已對稱化）──────────
+                st.markdown("#### 📊 精確版交互強度排行榜 Top 15")
+                rows_sv = []
+                for ii in range(n_sv):
+                    for jj in range(ii + 1, n_sv):
+                        rows_sv.append({
+                            "代碼 i": labels_sv[ii],
+                            "代碼 j": labels_sv[jj],
+                            "原始名稱 i": top_feats_sv[ii],
+                            "原始名稱 j": top_feats_sv[jj],
+                            "Mean |SHAP Interaction|": round(float(mean_abs_sv[ii, jj]), 5),
+                        })
+                rank_sv = (
+                    pd.DataFrame(rows_sv)
+                    .sort_values("Mean |SHAP Interaction|", ascending=False)
+                    .reset_index(drop=True)
+                    .head(15)
+                )
+                st.dataframe(
+                    rank_sv.style.background_gradient(
+                        cmap="YlOrRd", subset=["Mean |SHAP Interaction|"]
+                    ),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+                # ── 與 Dependence Plot auto 的對應說明 ─────────────
+                top1 = rank_sv.iloc[0]
+                st.success(
+                    f"🏆 最強交互：**{top1['代碼 i']}** ↔ **{top1['代碼 j']}**  "
+                    f"（{top1['原始名稱 i'][:30]} ↔ {top1['原始名稱 j'][:30]}）\n\n"
+                    f"在 Dependence Plot 中選擇 **{top1['代碼 i']}** 作為主特徵、"
+                    f"取消勾選「自動尋找」並手動選 **{top1['代碼 j']}** 作為交互著色，"
+                    f"即可看到最精確的交互效應圖。"
+                )
+                st.caption(
+                    "此結果與 Dependence Plot `interaction_index='auto'` 使用相同底層計算（TreeExplainer），"
+                    "是三種方法中最精確的交互衡量。"
+                )
+
 
 # ═══════════════════════════════════════════════════════════
 #  PLS-VIP Tab (enhanced with coefficients)
