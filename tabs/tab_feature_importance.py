@@ -53,7 +53,8 @@ def _render_rf_tab(fi_subtab, X_fi, y_fi, top_n_fi):
             with st.spinner("RF 訓練中..."):
                 rf = RandomForestRegressor(
                     n_estimators=n_est, max_features="sqrt",
-                    max_depth=max_dep, min_samples_leaf=min_leaf, random_state=42)
+                    max_depth=max_dep, min_samples_leaf=min_leaf,
+                    oob_score=True, random_state=42)
                 rf.fit(X_fi, y_fi)
                 perm = permutation_importance(rf, X_fi, y_fi,
                                               n_repeats=n_rep, random_state=42)
@@ -65,7 +66,16 @@ def _render_rf_tab(fi_subtab, X_fi, y_fi, top_n_fi):
                 r2 = r2_score(y_fi, rf.predict(X_fi))
                 st.session_state.update({"fi_rf": rf, "fi_perm_df": perm_df, "fi_r2": r2,
                                          "shap_vals": None})
-            st.success(f"✅ 完成！訓練 R² = {r2:.3f}")
+            # OOB R²
+            oob_r2 = rf.oob_score_ if hasattr(rf, "oob_score_") else None
+            # MDI importance
+            mdi_df = pd.DataFrame({
+                "Feature": X_fi.columns,
+                "MDI_Importance": rf.feature_importances_,
+            }).sort_values("MDI_Importance", ascending=False).reset_index(drop=True)
+            st.session_state.update({"fi_mdi_df": mdi_df, "fi_oob_r2": oob_r2})
+            oob_str = f"  OOB R² = {oob_r2:.3f}" if oob_r2 else ""
+            st.success(f"✅ 完成！訓練 R² = {r2:.3f}{oob_str}")
 
         if st.session_state.get("fi_perm_df") is None:
             return
@@ -86,11 +96,44 @@ def _render_rf_tab(fi_subtab, X_fi, y_fi, top_n_fi):
         ax.grid(axis="x", linestyle="--", alpha=0.5)
         plt.tight_layout(); st.pyplot(fig); plt.close()
 
-        c1, c2 = st.columns(2)
+        oob_r2  = st.session_state.get("fi_oob_r2")
+        mdi_df  = st.session_state.get("fi_mdi_df")
+        c1, c2, c3 = st.columns(3)
         c1.metric("訓練集 R²", f"{r2:.3f}")
-        c2.metric("特徵數", X_fi.shape[1])
+        c2.metric("OOB R²（不偏估計）", f"{oob_r2:.3f}" if oob_r2 is not None else "—")
+        c3.metric("特徵數", X_fi.shape[1])
+
         st.dataframe(perm_df.style.background_gradient(cmap="Blues", subset=["Perm_Importance"]),
                      width="stretch", hide_index=True)
+
+        # MDI vs Permutation 比較
+        if mdi_df is not None:
+            st.markdown("#### MDI vs Permutation Importance 比較")
+            st.caption(
+                "**MDI**（Mean Decrease Impurity）：訓練集內計算，易受高基數特徵影響，速度快。"
+                "　**Permutation**：亂序後測量預測力下降，更可靠但較慢。兩者方向一致代表結果穩健。"
+            )
+            # 合併後正規化到 [0,1]
+            merge_df = perm_df[["Feature","Perm_Importance"]].merge(
+                mdi_df[["Feature","MDI_Importance"]], on="Feature"
+            ).head(top_n_fi)
+            merge_df["Perm_norm"] = merge_df["Perm_Importance"] / (merge_df["Perm_Importance"].abs().max() + 1e-9)
+            merge_df["MDI_norm"]  = merge_df["MDI_Importance"]  / (merge_df["MDI_Importance"].max() + 1e-9)
+            merge_df = merge_df.sort_values("Perm_norm", ascending=True)
+
+            fig, ax = plt.subplots(figsize=(10, max(5, len(merge_df)*0.4)))
+            y_pos = range(len(merge_df))
+            ax.barh([p - 0.18 for p in y_pos], merge_df["Perm_norm"], height=0.35,
+                    color="#2e86ab", alpha=0.85, label="Permutation (norm)")
+            ax.barh([p + 0.18 for p in y_pos], merge_df["MDI_norm"],  height=0.35,
+                    color="#f4a261", alpha=0.85, label="MDI (norm)")
+            ax.set_yticks(list(y_pos))
+            ax.set_yticklabels(merge_df["Feature"].tolist(), fontsize=8)
+            ax.set_xlabel("正規化重要性（0-1）")
+            ax.set_title(f"MDI vs Permutation Importance（Top {len(merge_df)}）")
+            ax.legend(fontsize=9)
+            ax.grid(axis="x", linestyle="--", alpha=0.4)
+            plt.tight_layout(); st.pyplot(fig); plt.close()
 
 
 # ═══════════════════════════════════════════════════════════
@@ -148,7 +191,7 @@ def _render_lasso_tab(fi_subtab, X_fi, y_fi, top_n_fi):
             return
 
         coef_df   = st.session_state["lasso_coef_df"]
-        best_alpha= st.session_state["lasso_alpha"]
+        best_alpha= st.session_state.get("lasso_alpha_val", st.session_state.get("lasso_alpha", 0.01))
         r2_lasso  = st.session_state["lasso_r2"]
         n_nonzero = st.session_state["lasso_n_nonzero"]
 
@@ -177,6 +220,27 @@ def _render_lasso_tab(fi_subtab, X_fi, y_fi, top_n_fi):
         st.caption("係數已在標準化特徵上計算，數值可直接比較特徵相對影響力。")
         st.dataframe(coef_df.style.background_gradient(cmap="RdBu_r", subset=["Coefficient"]),
                      width="stretch", hide_index=True)
+
+        # Regularization Path
+        with st.expander("📈 Regularization Path（Alpha vs 係數）", expanded=False):
+            st.caption("觀察不同 α 值下各特徵的係數變化，了解特徵進入模型的順序。")
+            from sklearn.linear_model import lasso_path
+            scaler_path = StandardScaler()
+            X_path = scaler_path.fit_transform(X_fi)
+            alphas_path, coefs_path, _ = lasso_path(X_path, y_fi, eps=1e-3, n_alphas=80)
+            # 只畫 top N 非零特徵
+            nonzero_mask = np.any(coefs_path != 0, axis=1)
+            top_feat_idx = np.argsort(np.abs(coefs_path[:, -1]))[-min(top_n_fi, nonzero_mask.sum()):]
+            fig, ax = plt.subplots(figsize=(10, 5))
+            for i in top_feat_idx:
+                ax.plot(np.log10(alphas_path), coefs_path[i], label=X_fi.columns[i][:25], lw=1.2)
+            ax.axvline(np.log10(best_alpha), color="#e84855", ls="--", lw=1.5, label=f"最佳 α={best_alpha:.4f}")
+            ax.set_xlabel("log10(α)")
+            ax.set_ylabel("Coefficient")
+            ax.set_title("Lasso Regularization Path")
+            ax.legend(fontsize=7, bbox_to_anchor=(1.01, 1), loc="upper left")
+            ax.grid(alpha=0.3)
+            plt.tight_layout(); st.pyplot(fig); plt.close()
 
 
 # ═══════════════════════════════════════════════════════════
@@ -717,12 +781,32 @@ def _render_pls_tab(fi_subtab, X_fi, y_fi, top_n_fi):
                 y_pred = pls.predict(X_arr).ravel()
                 r2_pls = r2_score(y_arr, y_pred)
 
+                # Q²：cross-validated R²（不偏估計）
+                from sklearn.model_selection import KFold
+                kf = KFold(n_splits=min(5, len(y_arr)), shuffle=True, random_state=42)
+                q2_scores = []
+                for tr, te in kf.split(X_arr):
+                    pls_cv = PLSRegression(n_components=n_pls)
+                    pls_cv.fit(X_arr[tr], y_arr[tr])
+                    q2_scores.append(r2_score(y_arr[te], pls_cv.predict(X_arr[te]).ravel()))
+                q2_pls = float(np.mean(q2_scores))
+
+                # Y explained variance per component
+                y_var_per_comp = []
+                for nc in range(1, n_pls + 1):
+                    pls_tmp = PLSRegression(n_components=nc)
+                    pls_tmp.fit(X_arr, y_arr)
+                    y_var_per_comp.append(r2_score(y_arr, pls_tmp.predict(X_arr).ravel()))
+                y_var_each = [y_var_per_comp[0]] + [y_var_per_comp[i] - y_var_per_comp[i-1]
+                                                     for i in range(1, n_pls)]
+
                 st.session_state.update({
                     "pls_vip_df": vip_df, "pls_reg_coef_df": reg_coef_df,
                     "pls_x_loadings": x_load, "pls_x_weights": x_weights,
-                    "pls_r2": r2_pls, "pls_model": pls,
+                    "pls_r2": r2_pls, "pls_q2": q2_pls,
+                    "pls_y_var_each": y_var_each, "pls_model": pls,
                 })
-            st.success(f"✅ 完成！R² = {r2_pls:.3f}")
+            st.success(f"✅ 完成！R² = {r2_pls:.3f}　Q² = {q2_pls:.3f}")
 
         if st.session_state.get("pls_vip_df") is None:
             return
@@ -732,7 +816,25 @@ def _render_pls_tab(fi_subtab, X_fi, y_fi, top_n_fi):
         x_weights    = st.session_state["pls_x_weights"]
         r2_pls       = st.session_state["pls_r2"]
 
-        st.metric("PLS R²", f"{r2_pls:.3f}")
+        q2_pls = st.session_state.get("pls_q2")
+        y_var_each = st.session_state.get("pls_y_var_each", [])
+        pm1, pm2, pm3 = st.columns(3)
+        pm1.metric("PLS R²（訓練集）", f"{r2_pls:.3f}")
+        pm2.metric("Q²（CV，不偏）", f"{q2_pls:.3f}" if q2_pls is not None else "—",
+                   help="Q² > 0.5 代表模型有預測力；Q² 接近 R² 代表無過擬合")
+        pm3.metric("過擬合風險", "低 ✅" if q2_pls and r2_pls - q2_pls < 0.15 else "注意 ⚠️" if q2_pls else "—")
+
+        if y_var_each:
+            st.markdown("**各 Component 新增的 Y 解釋變異（%）**")
+            fig_pls, ax_pls = plt.subplots(figsize=(7, 3))
+            ax_pls.bar([f"PC{i+1}" for i in range(len(y_var_each))],
+                       [v*100 for v in y_var_each], color="#2e86ab", alpha=0.8)
+            for i, v in enumerate(y_var_each):
+                ax_pls.text(i, v*100 + 0.5, f"{v*100:.1f}%", ha="center", fontsize=9)
+            ax_pls.set_ylabel("新增解釋 Y 變異 (%)")
+            ax_pls.set_title("PLS 各主成分對 Y 的邊際解釋力")
+            ax_pls.grid(axis="y", alpha=0.3)
+            plt.tight_layout(); st.pyplot(fig_pls); plt.close()
 
         pls_subtabs = st.tabs(["VIP Score", "迴歸係數", "X Loadings", "X Weights"])
 
@@ -882,6 +984,249 @@ def _render_interaction_ranking(X_fi, top_n_fi):
         "相關性(Abs)": "{:.2f}"
     }))
     
+
+
+# ═══════════════════════════════════════════════════════════
+#  Mutual Information Tab
+# ═══════════════════════════════════════════════════════════
+
+def _render_mi_tab(X_fi, y_fi, top_n_fi):
+    st.markdown("#### 🤝 Mutual Information（互資訊）")
+    st.caption(
+        "MI 衡量特徵與目標之間的**非線性**相依程度，不限於線性關係。"
+        "單位為 bit，越大代表共享的資訊量越多。"
+        "與 Pearson 相關係數互補：相關係數接近 0 但 MI 高，代表存在非線性關係。"
+    )
+
+    with st.expander("⚙️ MI 設定", expanded=False):
+        mi1, mi2 = st.columns(2)
+        n_neighbors_mi = mi1.slider("n_neighbors", 3, 15, 5, key="mi_neighbors",
+                                     help="KNN 估計 MI 的鄰近數，越大越平滑")
+        random_mi = mi2.number_input("random_state", value=42, step=1, key="mi_random")
+
+    if st.button("🤝 計算 Mutual Information", key="run_mi", type="primary"):
+        from sklearn.feature_selection import mutual_info_regression
+        with st.spinner("計算 MI..."):
+            mi_vals = mutual_info_regression(
+                X_fi, y_fi,
+                n_neighbors=n_neighbors_mi,
+                random_state=int(random_mi)
+            )
+            mi_df = pd.DataFrame({
+                "Feature": X_fi.columns,
+                "MI":      mi_vals,
+            }).sort_values("MI", ascending=False).reset_index(drop=True)
+
+            # 同時算 Pearson 相關係數做比較
+            pearson_vals = X_fi.corrwith(y_fi).reindex(X_fi.columns).values
+            mi_df["Pearson_r"]    = pearson_vals
+            mi_df["Pearson_abs"]  = np.abs(pearson_vals)
+            mi_df["MI_norm"]      = mi_df["MI"] / (mi_df["MI"].max() + 1e-9)
+            mi_df["Pearson_norm"] = mi_df["Pearson_abs"] / (mi_df["Pearson_abs"].max() + 1e-9)
+            mi_df["NonLinear_signal"] = mi_df["MI_norm"] - mi_df["Pearson_norm"]
+
+            st.session_state["mi_df"] = mi_df
+        st.success(f"✅ 完成！Top 特徵：{mi_df.iloc[0]['Feature']}")
+
+    if st.session_state.get("mi_df") is None:
+        return
+
+    mi_df = st.session_state["mi_df"]
+
+    # ── 主圖：MI Bar ──────────────────────────────────────────
+    top_mi = mi_df.head(top_n_fi)
+    fig, axes = plt.subplots(1, 2, figsize=(16, max(5, top_n_fi * 0.42)))
+
+    axes[0].barh(top_mi["Feature"], top_mi["MI"], color="#7209b7", alpha=0.85)
+    axes[0].set_xlabel("Mutual Information (bits)")
+    axes[0].set_title(f"Mutual Information（Top {top_n_fi}）")
+    axes[0].invert_yaxis()
+    axes[0].grid(axis="x", linestyle="--", alpha=0.4)
+
+    # MI vs Pearson 比較
+    merge = top_mi.sort_values("MI_norm", ascending=True)
+    y_pos = range(len(merge))
+    axes[1].barh([p - 0.18 for p in y_pos], merge["MI_norm"],     height=0.35,
+                 color="#7209b7", alpha=0.85, label="MI (norm)")
+    axes[1].barh([p + 0.18 for p in y_pos], merge["Pearson_norm"], height=0.35,
+                 color="#2e86ab", alpha=0.85, label="|Pearson r| (norm)")
+    axes[1].set_yticks(list(y_pos))
+    axes[1].set_yticklabels(merge["Feature"].tolist(), fontsize=8)
+    axes[1].set_xlabel("正規化分數（0-1）")
+    axes[1].set_title("MI vs |Pearson r| 比較")
+    axes[1].legend(fontsize=9)
+    axes[1].grid(axis="x", linestyle="--", alpha=0.4)
+
+    plt.tight_layout()
+    st.pyplot(fig)
+    plt.close()
+
+    # ── 非線性信號偵測 ────────────────────────────────────────
+    st.markdown("#### 🔍 非線性信號偵測")
+    st.caption(
+        "**MI_norm - |Pearson|_norm > 0** 的特徵，代表線性相關低但資訊量高，"
+        "可能存在非線性關係，值得在 SHAP Dependence Plot 進一步觀察。"
+    )
+    nonlinear_df = mi_df[mi_df["NonLinear_signal"] > 0.05].sort_values(
+        "NonLinear_signal", ascending=False
+    ).head(top_n_fi)
+
+    if nonlinear_df.empty:
+        st.info("未偵測到顯著非線性信號（所有特徵的 Pearson 已足夠解釋 MI）。")
+    else:
+        fig2, ax2 = plt.subplots(figsize=(10, max(4, len(nonlinear_df) * 0.4)))
+        ax2.barh(nonlinear_df["Feature"], nonlinear_df["NonLinear_signal"],
+                 color="#e84855", alpha=0.85)
+        ax2.axvline(0, color="black", lw=1)
+        ax2.set_xlabel("MI_norm − |Pearson|_norm（正值=非線性信號）")
+        ax2.set_title("非線性信號強度排名")
+        ax2.invert_yaxis()
+        ax2.grid(axis="x", alpha=0.4)
+        plt.tight_layout()
+        st.pyplot(fig2)
+        plt.close()
+
+    st.dataframe(
+        mi_df.head(top_n_fi).style
+            .background_gradient(cmap="Purples", subset=["MI"])
+            .background_gradient(cmap="RdBu_r",  subset=["Pearson_r"])
+            .format({"MI": "{:.4f}", "Pearson_r": "{:.3f}",
+                     "MI_norm": "{:.3f}", "Pearson_norm": "{:.3f}",
+                     "NonLinear_signal": "{:.3f}"}),
+        use_container_width=True, hide_index=True
+    )
+
+
+# ═══════════════════════════════════════════════════════════
+#  綜合排名 Tab
+# ═══════════════════════════════════════════════════════════
+
+def _render_consensus_tab(X_fi, top_n_fi):
+    st.markdown("#### 🏆 綜合重要性排名")
+    st.caption(
+        "整合所有已執行的方法（RF Permutation、Lasso、SHAP、PLS-VIP、Mutual Information），"
+        "以**名次平均**計算綜合排名。方法越多、分析越全面。"
+    )
+
+    methods = {}
+
+    perm_df = st.session_state.get("fi_perm_df")
+    if perm_df is not None and "Perm_Importance" in perm_df.columns:
+        methods["RF_Perm"] = perm_df.set_index("Feature")["Perm_Importance"].reindex(X_fi.columns).fillna(0)
+
+    lasso_df = st.session_state.get("lasso_coef_df")
+    if lasso_df is not None and "Abs_Coef" in lasso_df.columns:
+        methods["Lasso"] = lasso_df.set_index("Feature")["Abs_Coef"].reindex(X_fi.columns).fillna(0)
+
+    shap_vals = st.session_state.get("shap_vals")
+    if shap_vals is not None:
+        mean_shap = np.abs(np.array(shap_vals)).mean(axis=0)
+        methods["SHAP"] = pd.Series(mean_shap, index=X_fi.columns)
+
+    vip_df = st.session_state.get("pls_vip_df")
+    if vip_df is not None and "VIP" in vip_df.columns:
+        methods["PLS_VIP"] = vip_df.set_index("Feature")["VIP"].reindex(X_fi.columns).fillna(0)
+
+    mi_df = st.session_state.get("mi_df")
+    if mi_df is not None and "MI" in mi_df.columns:
+        methods["MI"] = mi_df.set_index("Feature")["MI"].reindex(X_fi.columns).fillna(0)
+
+    if not methods:
+        st.warning("尚未執行任何方法，請至少完成一種分析後再來看綜合排名。")
+        return
+
+    st.info(f"目前已納入 **{len(methods)}** 種方法：{', '.join(methods.keys())}")
+
+    # ── 名次平均法 ────────────────────────────────────────────
+    rank_df = pd.DataFrame(index=X_fi.columns)
+    score_df = pd.DataFrame(index=X_fi.columns)
+
+    for method, series in methods.items():
+        # 正規化到 0-1
+        mn, mx = series.min(), series.max()
+        score_df[method] = ((series - mn) / (mx - mn + 1e-9)).clip(0, 1)
+        # 名次（rank，越重要名次越低）
+        rank_df[method] = series.rank(ascending=False, method="average")
+
+    rank_df["平均名次"]   = rank_df.mean(axis=1)
+    score_df["綜合分數"]  = score_df.mean(axis=1)
+    consensus = score_df[["綜合分數"]].join(rank_df[["平均名次"]]).join(score_df[list(methods.keys())])
+    consensus = consensus.sort_values("綜合分數", ascending=False).reset_index()
+    consensus.rename(columns={"index": "Feature"}, inplace=True)
+
+    top_cons = consensus.head(top_n_fi)
+
+    # ── 綜合分數條形圖 ────────────────────────────────────────
+    fig, ax = plt.subplots(figsize=(10, max(5, len(top_cons) * 0.45)))
+    colors = plt.cm.RdYlGn(np.linspace(0.3, 0.9, len(top_cons)))[::-1]
+    ax.barh(top_cons["Feature"], top_cons["綜合分數"], color=colors, alpha=0.9)
+    ax.set_xlabel("綜合分數（各方法正規化後平均，0-1）")
+    ax.set_title(f"🏆 綜合重要性 Top {len(top_cons)}（{', '.join(methods.keys())}）")
+    ax.invert_yaxis()
+    ax.grid(axis="x", linestyle="--", alpha=0.4)
+    for i, (_, row) in enumerate(top_cons.iterrows()):
+        ax.text(row["綜合分數"] + 0.005, i, f"{row['綜合分數']:.3f}", va="center", fontsize=8)
+    plt.tight_layout()
+    st.pyplot(fig)
+    plt.close()
+
+    # ── Heatmap：各方法分數 ───────────────────────────────────
+    st.markdown("#### 各方法正規化分數 Heatmap")
+    heat_data = top_cons.set_index("Feature")[list(methods.keys())]
+    fig2, ax2 = plt.subplots(figsize=(max(8, len(methods) * 1.5), max(5, len(top_cons) * 0.4)))
+    im = ax2.imshow(heat_data.values, cmap="RdYlGn", aspect="auto", vmin=0, vmax=1)
+    plt.colorbar(im, ax=ax2, shrink=0.6, label="正規化分數")
+    ax2.set_xticks(range(len(methods)))
+    ax2.set_xticklabels(list(methods.keys()), fontsize=10)
+    ax2.set_yticks(range(len(heat_data)))
+    ax2.set_yticklabels([f[:45] for f in heat_data.index], fontsize=8)
+    for i in range(len(heat_data)):
+        for j in range(len(methods)):
+            val = heat_data.values[i, j]
+            ax2.text(j, i, f"{val:.2f}", ha="center", va="center",
+                     fontsize=8, color="white" if val < 0.4 else "black")
+    ax2.set_title("各方法正規化分數（綠=高重要性，紅=低重要性）")
+    plt.tight_layout()
+    st.pyplot(fig2)
+    plt.close()
+
+    st.dataframe(
+        consensus.head(top_n_fi).style
+            .background_gradient(cmap="RdYlGn", subset=["綜合分數"])
+            .background_gradient(cmap="RdYlGn_r", subset=["平均名次"])
+            .format({"綜合分數": "{:.4f}", "平均名次": "{:.1f}",
+                     **{m: "{:.3f}" for m in methods.keys()}}),
+        use_container_width=True, hide_index=True
+    )
+
+    # ── 方法一致性分析 ────────────────────────────────────────
+    if len(methods) >= 2:
+        st.markdown("#### 📊 方法間一致性")
+        st.caption("各方法名次之間的 Spearman 相關，相關越高代表方法結論越一致。")
+        from scipy.stats import spearmanr
+        method_names = list(methods.keys())
+        n_m = len(method_names)
+        corr_mat = np.eye(n_m)
+        for i in range(n_m):
+            for j in range(i+1, n_m):
+                r, _ = spearmanr(rank_df[method_names[i]], rank_df[method_names[j]])
+                corr_mat[i, j] = corr_mat[j, i] = r
+
+        fig3, ax3 = plt.subplots(figsize=(max(5, n_m * 1.2), max(4, n_m)))
+        im3 = ax3.imshow(corr_mat, cmap="RdYlGn", vmin=-1, vmax=1)
+        plt.colorbar(im3, ax=ax3, shrink=0.8)
+        ax3.set_xticks(range(n_m)); ax3.set_yticks(range(n_m))
+        ax3.set_xticklabels(method_names, fontsize=10)
+        ax3.set_yticklabels(method_names, fontsize=10)
+        for i in range(n_m):
+            for j in range(n_m):
+                ax3.text(j, i, f"{corr_mat[i,j]:.2f}", ha="center", va="center",
+                         fontsize=10, color="white" if abs(corr_mat[i,j]) < 0.4 else "black")
+        ax3.set_title("方法間 Spearman 名次相關（1=完全一致，-1=完全相反）")
+        plt.tight_layout()
+        st.pyplot(fig3)
+        plt.close()
+
 # ═══════════════════════════════════════════════════════════
 #  Main render
 # ═══════════════════════════════════════════════════════════
@@ -924,7 +1269,7 @@ def render(selected_process_df):
     y_fi = st.session_state["fi_y"]
 
     # 🔄 [新功能] — 在 Tabs 清單最後加一個「🔄 交互作用探索」
-    fi_subtabs = st.tabs(["🌲 RF 重要性", "🔪 Lasso 重要性", "🔮 SHAP 分析", "📐 PLS-VIP", "🔄 交互作用探索"])
+    fi_subtabs = st.tabs(["🌲 RF 重要性", "🔪 Lasso 重要性", "🔮 SHAP 分析", "📐 PLS-VIP", "🔄 交互作用探索", "🤝 Mutual Information", "🏆 綜合排名"])
     _render_rf_tab(fi_subtabs[0], X_fi, y_fi, top_n_fi)
     _render_lasso_tab(fi_subtabs[1], X_fi, y_fi, top_n_fi)
     _render_shap_tab(fi_subtabs[2], X_fi, y_fi, top_n_fi)
@@ -933,6 +1278,11 @@ def render(selected_process_df):
     # 🔄 [新功能] — 渲染交互作用分頁的熱點圖
     with fi_subtabs[4]:
         _render_correlation_heatmap(X_fi, top_n_fi)
-        # --- 加上下面這一行 ---
-        st.divider() # 加一條分割線
+        st.divider()
         _render_interaction_ranking(X_fi, top_n_fi)
+
+    with fi_subtabs[5]:
+        _render_mi_tab(X_fi, y_fi, top_n_fi)
+
+    with fi_subtabs[6]:
+        _render_consensus_tab(X_fi, top_n_fi)
