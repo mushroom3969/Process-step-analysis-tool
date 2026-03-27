@@ -94,7 +94,6 @@ def _init_fe_state():
         "fe_stat_result":      None,
         "fe_auto_result":      None,
         "df_before_step2":     None,
-        "fe_minmax_ba_result": None,   # Step 1.5 結果
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -231,7 +230,6 @@ def _render_history_panel():
         idx = len(log) - 1 - i
         op_label = {
             "auto_clean":      "🔧 自動特徵工程",
-            "minmax_ba_merge": "🔀 Min/Max & Before/After 合併",
             "stat_filter":     "📉 統計篩選",
             "manual_drop":     "🗑️ 手動移除",
         }.get(entry["op_type"], entry["op_type"])
@@ -272,7 +270,6 @@ def _render_history_panel():
             st.session_state["fe_stat_result"] = None
             st.session_state["fe_auto_result"] = None
             st.session_state["df_before_step2"] = None
-            st.session_state["fe_minmax_ba_result"] = None
             st.toast("✅ 已完全重置", icon="🔄")
             st.rerun()
 
@@ -346,162 +343,6 @@ def _render_main(selected_process_df, show_mean: bool = True):
                 section_title="Step 1 變更", show_mean=show_mean
             )
 
-    # ══════════════════════════════════════════════════════════
-    # ── 區塊 A2：Step 1.5 Min/Max & Before/After 特徵合併 ────
-    # ══════════════════════════════════════════════════════════
-    if st.session_state.get("df_before_step2") is not None:
-        st.markdown("---")
-        st.markdown("### 🔀 Step 1.5：Min/Max & Before/After 特徵工程")
-        st.caption(
-            "自動偵測欄位名稱中含有 `min`/`max` 或 `before`/`after`（含全名／簡寫）的欄位對，"
-            "合併為具物理意義的新特徵（mean、range、diff），並移除原始欄位。"
-        )
-
-        if st.button("🔀 執行 Min/Max & Before/After 合併", key="run_minmax_ba", type="primary"):
-            src = st.session_state["df_before_step2"].copy()
-            snap = src.copy()
-            added_cols, removed_cols = [], []
-
-            import re as _re
-
-            def _normalize(name: str) -> str:
-                """把欄位名稱轉小寫，方便比對"""
-                return name.lower()
-
-            # ── 關鍵字別名 ──────────────────────────────────────
-            MIN_ALIASES  = {"min", "minimum", "minimun", "low", "lower", "lo", "l"}
-            MAX_ALIASES  = {"max", "maximum", "maximun", "high", "upper", "hi", "h"}
-            BEF_ALIASES  = {"before", "bef", "bf", "pre", "initial", "init", "start"}
-            AFT_ALIASES  = {"after",  "aft", "af", "post", "final", "fin", "end"}
-
-            def _find_keyword(name: str, aliases: set) -> tuple[bool, str]:
-                """
-                在欄位名稱中尋找 aliases 裡的關鍵字（整詞比對）。
-                回傳 (found, matched_keyword)
-                """
-                n = _normalize(name)
-                for kw in sorted(aliases, key=len, reverse=True):   # 長的先比，避免 'low' 命中 'lower'
-                    pattern = r'(?<![a-z0-9])' + _re.escape(kw) + r'(?![a-z0-9])'
-                    if _re.search(pattern, n):
-                        return True, kw
-                return False, ""
-
-            def _base_name(col: str, kw: str) -> str:
-                """把欄位名稱中的關鍵字去掉，得到 base"""
-                n = _normalize(col)
-                pattern = r'(?<![a-z0-9])' + _re.escape(kw) + r'(?![a-z0-9])'
-                base = _re.sub(pattern, "", n).strip("_- ")
-                return base
-
-            cols = [c for c in src.columns if c != "BatchID"]
-
-            # ── 建立 base → {min_col, max_col} 的對應 ──────────
-            min_map: dict[str, str] = {}   # base -> col name
-            max_map: dict[str, str] = {}
-            bef_map: dict[str, str] = {}
-            aft_map: dict[str, str] = {}
-
-            for col in cols:
-                is_min, kw = _find_keyword(col, MIN_ALIASES)
-                if is_min:
-                    b = _base_name(col, kw)
-                    if b not in min_map:
-                        min_map[b] = col
-                    continue
-                is_max, kw = _find_keyword(col, MAX_ALIASES)
-                if is_max:
-                    b = _base_name(col, kw)
-                    if b not in max_map:
-                        max_map[b] = col
-                    continue
-                is_bef, kw = _find_keyword(col, BEF_ALIASES)
-                if is_bef:
-                    b = _base_name(col, kw)
-                    if b not in bef_map:
-                        bef_map[b] = col
-                    continue
-                is_aft, kw = _find_keyword(col, AFT_ALIASES)
-                if is_aft:
-                    b = _base_name(col, kw)
-                    if b not in aft_map:
-                        aft_map[b] = col
-
-            # ── 處理 Min/Max 配對 ───────────────────────────────
-            minmax_pairs = set(min_map) & set(max_map)
-            for base in sorted(minmax_pairs):
-                c_min = min_map[base]
-                c_max = max_map[base]
-                label = base if base else f"{c_min}_{c_max}"
-                label = label.strip("_- ")
-
-                mean_col  = f"{label}_mean"
-                range_col = f"{label}_range"
-
-                src[mean_col]  = (src[c_min] + src[c_max]) / 2
-                src[range_col] = src[c_max] - src[c_min]
-
-                src.drop(columns=[c_min, c_max], inplace=True)
-                added_cols  += [mean_col, range_col]
-                removed_cols += [c_min, c_max]
-
-            # ── 處理 Before/After 配對 ──────────────────────────
-            ba_pairs = set(bef_map) & set(aft_map)
-            for base in sorted(ba_pairs):
-                c_bef = bef_map[base]
-                c_aft = aft_map[base]
-                label = base if base else f"{c_bef}_{c_aft}"
-                label = label.strip("_- ")
-
-                diff_col = f"{label}_diff"   # after - before（正值 = 上升）
-
-                src[diff_col] = src[c_aft] - src[c_bef]
-
-                src.drop(columns=[c_bef, c_aft], inplace=True)
-                added_cols  += [diff_col]
-                removed_cols += [c_bef, c_aft]
-
-            # ── 更新 session state ───────────────────────────────
-            st.session_state["clean_df"]        = src
-            st.session_state["df_before_step2"] = src.copy()   # 讓 Step 2 用新的基礎
-
-            _push_op(
-                "minmax_ba_merge",
-                cols_removed=removed_cols,
-                cols_added=added_cols,
-                snapshot_before=snap,
-            )
-
-            n_mm = len(minmax_pairs)
-            n_ba = len(ba_pairs)
-            st.session_state["fe_minmax_ba_result"] = {
-                "added":   added_cols,
-                "removed": removed_cols,
-                "snap":    snap,
-                "src":     src,
-                "n_mm":    n_mm,
-                "n_ba":    n_ba,
-            }
-            st.session_state["fe_stat_result"] = None   # Step 2 重算
-            st.rerun()
-
-        # 持久化顯示 Step 1.5 結果
-        mmba_res = st.session_state.get("fe_minmax_ba_result")
-        if mmba_res:
-            st.success(
-                f"✅ Step 1.5 完成：偵測到 {mmba_res['n_mm']} 組 Min/Max、"
-                f"{mmba_res['n_ba']} 組 Before/After，"
-                f"新增 {len(mmba_res['added'])} 欄、移除 {len(mmba_res['removed'])} 欄"
-            )
-            with st.expander("查看 Step 1.5 變更詳情", expanded=False):
-                _render_changed_cols(
-                    df_before=mmba_res["snap"],
-                    df_after=mmba_res["src"],
-                    cols_removed=mmba_res["removed"],
-                    cols_added=mmba_res["added"],
-                    source_df_for_removed=mmba_res["snap"],
-                    section_title="Step 1.5 變更",
-                    show_mean=show_mean,
-                )
 
     # ══════════════════════════════════════════════════════════
     # ── 區塊 B：Step 2 統計篩選 ───────────────────────────────
