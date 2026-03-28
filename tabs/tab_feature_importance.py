@@ -80,8 +80,14 @@ def _render_eval_section(
     y_train / y_train_pred  training set actuals + preds
     y_test  / y_test_pred   test set actuals + preds (or None)
     cv_scores               dict  metric_name -> np.ndarray  fold scores
+                            建議只傳 R²、RMSE、MAE（MedAE/MaxErr 不適合 K-fold ±）
     n_features              number of input features (for Adj R²)
     oob_r2                  OOB R² (RF only, or None)
+
+    顯示邏輯
+    --------
+    有 Test split  → 指標表（Train + Test 點估計）+ 各圖並列 + K-fold 作補充
+    無 Test split  → K-fold ± std 升格為主角 + Train 圖（標注「僅供參考」）
     """
     y_train      = np.asarray(y_train,      dtype=float)
     y_train_pred = np.asarray(y_train_pred, dtype=float)
@@ -92,7 +98,8 @@ def _render_eval_section(
 
     p = n_features
 
-    # ── metric helpers ────────────────────────────────────
+    # ── 內部小工具 ────────────────────────────────────────
+
     def _metrics(yt, yp, label):
         n    = len(yt)
         r2   = float(r2_score(yt, yp))
@@ -104,37 +111,15 @@ def _render_eval_section(
         mede = float(median_absolute_error(yt, yp))
         maxe = float(max_error(yt, yp))
         return {
-            "集合":     label,
-            "R²":       round(r2,   4),
-            "Adj.R²":   round(adj,  4) if not math.isnan(adj) else "—",
-            "RMSE":     round(rmse, 4),
-            "MAE":      round(mae,  4),
-            "MAPE(%)":  round(mape, 2) if not math.isnan(mape) else "—",
-            "MedAE":    round(mede, 4),
-            "MaxErr":   round(maxe, 4),
+            "集合":    label,
+            "R²":      round(r2,   4),
+            "Adj.R²":  round(adj,  4) if not math.isnan(adj) else "—",
+            "RMSE":    round(rmse, 4),
+            "MAE":     round(mae,  4),
+            "MAPE(%)": round(mape, 2) if not math.isnan(mape) else "—",
+            "MedAE":   round(mede, 4),
+            "MaxErr":  round(maxe, 4),
         }
-
-    rows = [_metrics(y_train, y_train_pred, "Train")]
-    if has_test:
-        rows.append(_metrics(y_test, y_test_pred, "Test"))
-    if oob_r2 is not None:
-        rows.append({
-            "集合": "OOB", "R²": round(float(oob_r2), 4), "Adj.R²": "—",
-            "RMSE": "—", "MAE": "—", "MAPE(%)": "—", "MedAE": "—", "MaxErr": "—",
-        })
-
-    st.markdown(f"##### 📊 {model_name} — 模型評估")
-
-    # ── 指標表 ─────────────────────────────────────────────
-    st.markdown("**📋 評估指標**")
-    metrics_df = pd.DataFrame(rows).set_index("集合")
-    st.dataframe(metrics_df, use_container_width=True)
-
-    n_cols = 2 if has_test else 1
-
-    # ── Actual vs Predicted ──────────────────────────────
-    st.markdown("**📈 Actual vs Predicted**")
-    avp_cols = st.columns(n_cols)
 
     def _avp_ax(ax, yt, yp, label, color):
         mn = min(yt.min(), yp.min()); mx = max(yt.max(), yp.max())
@@ -145,20 +130,6 @@ def _render_eval_section(
         ax.set_xlabel("Actual"); ax.set_ylabel("Predicted")
         ax.set_title(f"{label}\nR²={r2v:.3f}  Adj.R²={_fmt(adjv)}", fontsize=10)
         ax.grid(alpha=0.3)
-
-    with avp_cols[0]:
-        fig, ax = plt.subplots(figsize=(6, 5))
-        _avp_ax(ax, y_train, y_train_pred, "Train", "#2e86ab")
-        plt.tight_layout(); st.pyplot(fig); plt.close()
-    if has_test:
-        with avp_cols[1]:
-            fig, ax = plt.subplots(figsize=(6, 5))
-            _avp_ax(ax, y_test, y_test_pred, "Test", "#e84855")
-            plt.tight_layout(); st.pyplot(fig); plt.close()
-
-    # ── Residual vs Predicted ────────────────────────────
-    st.markdown("**📉 Residual vs Predicted（含 ±1σ 帶）**")
-    res_cols = st.columns(n_cols)
 
     def _resid_ax(ax, yt, yp, label, color):
         resid = yt - yp
@@ -172,20 +143,6 @@ def _render_eval_section(
         ax.set_title(f"Residual vs Predicted ({label})", fontsize=10)
         ax.legend(fontsize=8); ax.grid(alpha=0.3)
 
-    with res_cols[0]:
-        fig, ax = plt.subplots(figsize=(6, 5))
-        _resid_ax(ax, y_train, y_train_pred, "Train", "#2e86ab")
-        plt.tight_layout(); st.pyplot(fig); plt.close()
-    if has_test:
-        with res_cols[1]:
-            fig, ax = plt.subplots(figsize=(6, 5))
-            _resid_ax(ax, y_test, y_test_pred, "Test", "#e84855")
-            plt.tight_layout(); st.pyplot(fig); plt.close()
-
-    # ── 殘差直方圖 + Shapiro-Wilk ─────────────────────────
-    st.markdown("**🔔 殘差分布直方圖 + Shapiro-Wilk 常態性檢定**")
-    sw_cols = st.columns(n_cols)
-
     def _hist_sw_ax(ax, yt, yp, label, color):
         resid  = yt - yp
         n_bins = min(30, max(10, len(resid) // 5))
@@ -194,7 +151,7 @@ def _render_eval_section(
         if len(resid) >= 3:
             try:
                 sw_stat, sw_p = _sp_stats.shapiro(resid[:5000])
-                tag = "✅ 常態 (p>0.05)" if sw_p > 0.05 else "⚠️ 非常態 (p≤0.05)"
+                tag      = "✅ 常態 (p>0.05)" if sw_p > 0.05 else "⚠️ 非常態 (p≤0.05)"
                 norm_str = f"Shapiro W={sw_stat:.3f}, p={sw_p:.4f}  {tag}"
             except Exception:
                 norm_str = "Shapiro: 無法計算"
@@ -203,20 +160,6 @@ def _render_eval_section(
         ax.set_xlabel("Residual"); ax.set_ylabel("Count")
         ax.set_title(f"殘差直方圖 ({label})\n{norm_str}", fontsize=9)
         ax.grid(alpha=0.3)
-
-    with sw_cols[0]:
-        fig, ax = plt.subplots(figsize=(6, 5))
-        _hist_sw_ax(ax, y_train, y_train_pred, "Train", "#2e86ab")
-        plt.tight_layout(); st.pyplot(fig); plt.close()
-    if has_test:
-        with sw_cols[1]:
-            fig, ax = plt.subplots(figsize=(6, 5))
-            _hist_sw_ax(ax, y_test, y_test_pred, "Test", "#e84855")
-            plt.tight_layout(); st.pyplot(fig); plt.close()
-
-    # ── Q-Q Plot ──────────────────────────────────────────
-    st.markdown("**📊 Q-Q Plot（常態性視覺化）**")
-    qq_cols = st.columns(n_cols)
 
     def _qq_ax(ax, yt, yp, label, color):
         resid = yt - yp
@@ -228,45 +171,163 @@ def _render_eval_section(
         ax.set_title(f"Q-Q Plot ({label})  Corr={r:.3f}", fontsize=10)
         ax.grid(alpha=0.3)
 
-    with qq_cols[0]:
-        fig, ax = plt.subplots(figsize=(6, 5))
-        _qq_ax(ax, y_train, y_train_pred, "Train", "#2e86ab")
-        plt.tight_layout(); st.pyplot(fig); plt.close()
-    if has_test:
-        with qq_cols[1]:
-            fig, ax = plt.subplots(figsize=(6, 5))
-            _qq_ax(ax, y_test, y_test_pred, "Test", "#e84855")
-            plt.tight_layout(); st.pyplot(fig); plt.close()
+    # K-fold 只顯示 R²、RMSE、MAE（MedAE/MaxErr fold 間變異太大，不適合 ±）
+    CV_SHOW_METRICS = {"R²", "RMSE", "MAE", "R² (Q²-fold)"}
 
-    # ── CV Scores table + boxplot ─────────────────────────
-    if cv_scores:
-        st.markdown("**📦 K-Fold CV 各指標 mean ± std**")
+    def _render_cv(cv_scores: dict, title_prefix: str = ""):
+        """K-fold ± std 表 + Boxplot，只顯示適合的指標。"""
+        filtered = {k: v for k, v in cv_scores.items() if k in CV_SHOW_METRICS}
+        if not filtered:
+            return
+        st.markdown(f"**📦 {title_prefix}K-Fold CV mean ± std**")
         cv_rows = []
-        for metric, vals in cv_scores.items():
+        for metric, vals in filtered.items():
             arr = np.asarray(vals, dtype=float)
             cv_rows.append({
-                "指標": metric,
-                "Mean": round(float(arr.mean()), 4),
-                "Std":  round(float(arr.std()),  4),
-                "Min":  round(float(arr.min()),  4),
-                "Max":  round(float(arr.max()),  4),
+                "指標":          metric,
+                "Mean":          round(float(arr.mean()), 4),
+                "Std":           round(float(arr.std()),  4),
+                "Min":           round(float(arr.min()),  4),
+                "Max":           round(float(arr.max()),  4),
                 "CV mean ± std": f"{arr.mean():.4f} ± {arr.std():.4f}",
             })
         st.dataframe(pd.DataFrame(cv_rows).set_index("指標"), use_container_width=True)
 
-        st.markdown("**📦 CV Fold 分布 Boxplot**")
-        mk = list(cv_scores.keys())
-        fig, ax = plt.subplots(figsize=(max(6, len(mk) * 1.5), 4))
-        data_box = [np.asarray(cv_scores[m], dtype=float) for m in mk]
-        bp = ax.boxplot(data_box, patch_artist=True)
+        st.markdown(f"**📦 {title_prefix}CV Fold 分布 Boxplot**")
+        mk  = list(filtered.keys())
         pal = ["#2e86ab", "#e84855", "#f4a261", "#43aa8b", "#9b5de5"]
+        fig, ax = plt.subplots(figsize=(max(5, len(mk) * 1.8), 4))
+        bp = ax.boxplot([np.asarray(filtered[m], dtype=float) for m in mk], patch_artist=True)
         for patch, c in zip(bp["boxes"], pal * 10):
             patch.set_facecolor(c); patch.set_alpha(0.7)
         ax.set_xticks(range(1, len(mk) + 1))
-        ax.set_xticklabels(mk, fontsize=10)
-        ax.set_title("K-Fold CV Fold Distribution"); ax.set_ylabel("Score")
-        ax.grid(axis="y", alpha=0.3)
+        ax.set_xticklabels(mk, fontsize=11)
+        ax.set_title("K-Fold CV Fold Distribution（R²、RMSE、MAE）")
+        ax.set_ylabel("Score"); ax.grid(axis="y", alpha=0.3)
         plt.tight_layout(); st.pyplot(fig); plt.close()
+
+    # ════════════════════════════════════════════════════════
+    st.markdown(f"##### 📊 {model_name} — 模型評估")
+
+    # ════════════════════════════════════════════════════════
+    #  分支 A：有 Train / Test Split
+    # ════════════════════════════════════════════════════════
+    if has_test:
+        # ── 指標表（點估計） ──────────────────────────────
+        st.markdown("**📋 評估指標（點估計）**")
+        rows = [_metrics(y_train, y_train_pred, "Train"),
+                _metrics(y_test,  y_test_pred,  "Test")]
+        if oob_r2 is not None:
+            rows.append({
+                "集合": "OOB", "R²": round(float(oob_r2), 4), "Adj.R²": "—",
+                "RMSE": "—", "MAE": "—", "MAPE(%)": "—", "MedAE": "—", "MaxErr": "—",
+            })
+        st.dataframe(pd.DataFrame(rows).set_index("集合"), use_container_width=True)
+
+        # ── 圖表（Train + Test 並列） ─────────────────────
+        st.markdown("**📈 Actual vs Predicted**")
+        c1, c2 = st.columns(2)
+        with c1:
+            fig, ax = plt.subplots(figsize=(6, 5))
+            _avp_ax(ax, y_train, y_train_pred, "Train", "#2e86ab")
+            plt.tight_layout(); st.pyplot(fig); plt.close()
+        with c2:
+            fig, ax = plt.subplots(figsize=(6, 5))
+            _avp_ax(ax, y_test, y_test_pred, "Test", "#e84855")
+            plt.tight_layout(); st.pyplot(fig); plt.close()
+
+        st.markdown("**📉 Residual vs Predicted（含 ±1σ 帶）**")
+        c1, c2 = st.columns(2)
+        with c1:
+            fig, ax = plt.subplots(figsize=(6, 5))
+            _resid_ax(ax, y_train, y_train_pred, "Train", "#2e86ab")
+            plt.tight_layout(); st.pyplot(fig); plt.close()
+        with c2:
+            fig, ax = plt.subplots(figsize=(6, 5))
+            _resid_ax(ax, y_test, y_test_pred, "Test", "#e84855")
+            plt.tight_layout(); st.pyplot(fig); plt.close()
+
+        st.markdown("**🔔 殘差分布直方圖 + Shapiro-Wilk 常態性檢定**")
+        c1, c2 = st.columns(2)
+        with c1:
+            fig, ax = plt.subplots(figsize=(6, 5))
+            _hist_sw_ax(ax, y_train, y_train_pred, "Train", "#2e86ab")
+            plt.tight_layout(); st.pyplot(fig); plt.close()
+        with c2:
+            fig, ax = plt.subplots(figsize=(6, 5))
+            _hist_sw_ax(ax, y_test, y_test_pred, "Test", "#e84855")
+            plt.tight_layout(); st.pyplot(fig); plt.close()
+
+        st.markdown("**📊 Q-Q Plot（常態性視覺化）**")
+        c1, c2 = st.columns(2)
+        with c1:
+            fig, ax = plt.subplots(figsize=(6, 5))
+            _qq_ax(ax, y_train, y_train_pred, "Train", "#2e86ab")
+            plt.tight_layout(); st.pyplot(fig); plt.close()
+        with c2:
+            fig, ax = plt.subplots(figsize=(6, 5))
+            _qq_ax(ax, y_test, y_test_pred, "Test", "#e84855")
+            plt.tight_layout(); st.pyplot(fig); plt.close()
+
+        # ── K-fold 作補充 ─────────────────────────────────
+        if cv_scores:
+            st.divider()
+            st.caption("📌 以下 K-Fold CV 為補充驗證（R²、RMSE、MAE），MedAE / MaxErr 不納入 CV ±。")
+            _render_cv(cv_scores)
+
+    # ════════════════════════════════════════════════════════
+    #  分支 B：無 Train / Test Split → K-fold 是主角
+    # ════════════════════════════════════════════════════════
+    else:
+        st.info(
+            "⚠️ 目前使用**全資料訓練**，無獨立 Test Set。"
+            "K-Fold CV 為主要泛化能力評估；Train 圖表僅供診斷參考，**請勿以 Train 指標判斷泛化能力**。",
+            icon="ℹ️",
+        )
+
+        # ── K-fold 升格為主角 ─────────────────────────────
+        if cv_scores:
+            _render_cv(cv_scores, title_prefix="【主要評估】")
+        elif oob_r2 is not None:
+            st.markdown("**📦 OOB R²（袋外估計，不偏）**")
+            st.metric("OOB R²", f"{oob_r2:.4f}",
+                      help="OOB = Out-Of-Bag，相當於不偏的 Test R²，可作為泛化能力參考。")
+        else:
+            st.warning("未提供 CV scores，無法顯示泛化評估。")
+
+        st.divider()
+
+        # ── Train 診斷圖（僅供參考） ──────────────────────
+        with st.expander("🔍 Train 診斷圖（全資料，僅供參考）", expanded=False):
+            # 指標表
+            st.markdown("**📋 Train 指標（全資料點估計，非泛化指標）**")
+            rows = [_metrics(y_train, y_train_pred, "Train（全資料）")]
+            if oob_r2 is not None:
+                rows.append({
+                    "集合": "OOB", "R²": round(float(oob_r2), 4), "Adj.R²": "—",
+                    "RMSE": "—", "MAE": "—", "MAPE(%)": "—", "MedAE": "—", "MaxErr": "—",
+                })
+            st.dataframe(pd.DataFrame(rows).set_index("集合"), use_container_width=True)
+
+            st.markdown("**📈 Actual vs Predicted（Train，僅供參考）**")
+            fig, ax = plt.subplots(figsize=(6, 5))
+            _avp_ax(ax, y_train, y_train_pred, "Train（全資料）", "#2e86ab")
+            plt.tight_layout(); st.pyplot(fig); plt.close()
+
+            st.markdown("**📉 Residual vs Predicted（含 ±1σ 帶）**")
+            fig, ax = plt.subplots(figsize=(6, 5))
+            _resid_ax(ax, y_train, y_train_pred, "Train（全資料）", "#2e86ab")
+            plt.tight_layout(); st.pyplot(fig); plt.close()
+
+            st.markdown("**🔔 殘差分布直方圖 + Shapiro-Wilk 常態性檢定**")
+            fig, ax = plt.subplots(figsize=(6, 5))
+            _hist_sw_ax(ax, y_train, y_train_pred, "Train（全資料）", "#2e86ab")
+            plt.tight_layout(); st.pyplot(fig); plt.close()
+
+            st.markdown("**📊 Q-Q Plot（常態性視覺化）**")
+            fig, ax = plt.subplots(figsize=(6, 5))
+            _qq_ax(ax, y_train, y_train_pred, "Train（全資料）", "#2e86ab")
+            plt.tight_layout(); st.pyplot(fig); plt.close()
 
 
 # ═══════════════════════════════════════════════════════════
