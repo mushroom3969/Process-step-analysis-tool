@@ -1136,7 +1136,10 @@ def _render_correlation_heatmap(X_fi, top_n_fi):
         fi_df = st.session_state.get("fi_perm_df")
         if fi_df is None:
             st.warning("請先執行 RF 訓練。"); return
-        top_feats  = fi_df["Feature"].head(top_n_fi).tolist()
+        top_feats  = [f for f in fi_df["Feature"].head(top_n_fi).tolist()
+                      if f in X_fi.columns]
+        if not top_feats:
+            st.warning("目前特徵與上次 RF 訓練的特徵不符，請重新執行 RF 訓練。"); return
         corr       = X_fi[top_feats].corr()
         fig_width  = max(10, top_n_fi * 0.7)
         fig_height = max(8,  top_n_fi * 0.6)
@@ -1156,7 +1159,9 @@ def _render_interaction_ranking(X_fi, top_n_fi):
     if fi_df is None:
         st.warning("請先在「RF 重要性」分頁訓練模型以取得特徵權重。"); return
     top_feats      = fi_df.head(top_n_fi)
-    feat_list      = top_feats["Feature"].tolist()
+    feat_list      = [f for f in top_feats["Feature"].tolist() if f in X_fi.columns]
+    if not feat_list:
+        st.warning("目前特徵與上次 RF 訓練的特徵不符，請重新執行 RF 訓練。"); return
     importance_map = dict(zip(top_feats["Feature"], top_feats["Perm_Importance"]))
     corr_matrix    = X_fi[feat_list].corr().abs()
     pairs = []
