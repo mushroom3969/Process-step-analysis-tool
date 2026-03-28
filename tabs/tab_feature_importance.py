@@ -383,13 +383,23 @@ def _render_rf_tab(fi_subtab, X_fi, y_fi, top_n_fi):
                     cv_mae   = -cross_val_score(rf, X_fi, y_fi, cv=kf,
                                                 scoring="neg_mean_absolute_error")
 
+                    # Test set 預測（若有 split）
+                    X_te_rf = st.session_state.get("fi_X_test")
+                    y_te_rf = st.session_state.get("fi_y_test")
+                    if X_te_rf is not None and y_te_rf is not None:
+                        y_test_pred_rf = rf.predict(X_te_rf)
+                    else:
+                        y_test_pred_rf = None
+
                     st.session_state.update({
                         "fi_rf": rf, "fi_perm_df": perm_df, "fi_mdi_df": mdi_df,
                         "fi_r2": r2_rf, "fi_oob_r2": oob_r2, "shap_vals": None,
                         # eval cache
-                        "_rf_y":          np.asarray(y_fi,     dtype=float),
-                        "_rf_y_pred":     y_pred_rf,
-                        "_rf_cv_scores":  {"R²": cv_r2, "RMSE": cv_rmse, "MAE": cv_mae},
+                        "_rf_y":           np.asarray(y_fi, dtype=float),
+                        "_rf_y_pred":      y_pred_rf,
+                        "_rf_y_test":      np.asarray(y_te_rf,        dtype=float) if y_te_rf is not None else None,
+                        "_rf_y_test_pred": np.asarray(y_test_pred_rf, dtype=float) if y_test_pred_rf is not None else None,
+                        "_rf_cv_scores":   {"R²": cv_r2, "RMSE": cv_rmse, "MAE": cv_mae},
                     })
 
                 n, p = len(y_fi), X_fi.shape[1]
@@ -466,6 +476,8 @@ def _render_rf_tab(fi_subtab, X_fi, y_fi, top_n_fi):
                     "Random Forest",
                     st.session_state["_rf_y"],
                     st.session_state["_rf_y_pred"],
+                    y_test=st.session_state.get("_rf_y_test"),
+                    y_test_pred=st.session_state.get("_rf_y_test_pred"),
                     cv_scores=st.session_state.get("_rf_cv_scores"),
                     n_features=X_fi.shape[1],
                     oob_r2=st.session_state.get("fi_oob_r2"),
@@ -527,6 +539,15 @@ def _render_lasso_tab(fi_subtab, X_fi, y_fi, top_n_fi):
                     cv_mae_l   = -cross_val_score(lasso_fixed, X_scaled, y_fi, cv=kf_l,
                                                    scoring="neg_mean_absolute_error")
 
+                    # Test set 預測（若有 split）
+                    X_te_la = st.session_state.get("fi_X_test")
+                    y_te_la = st.session_state.get("fi_y_test")
+                    if X_te_la is not None and y_te_la is not None:
+                        X_te_la_scaled = scaler.transform(X_te_la)
+                        y_test_pred_la = model.predict(X_te_la_scaled)
+                    else:
+                        y_test_pred_la = None
+
                     st.session_state.update({
                         "lasso_model":     model,
                         "lasso_coef_df":   coef_df,
@@ -535,9 +556,11 @@ def _render_lasso_tab(fi_subtab, X_fi, y_fi, top_n_fi):
                         "lasso_scaler":    scaler,
                         "lasso_n_nonzero": n_nonzero,
                         # eval cache
-                        "_la_y":         np.asarray(y_fi, dtype=float),
-                        "_la_y_pred":    y_pred_la,
-                        "_la_cv_scores": {"R²": cv_r2_l, "RMSE": cv_rmse_l, "MAE": cv_mae_l},
+                        "_la_y":           np.asarray(y_fi, dtype=float),
+                        "_la_y_pred":      y_pred_la,
+                        "_la_y_test":      np.asarray(y_te_la,        dtype=float) if y_te_la is not None else None,
+                        "_la_y_test_pred": np.asarray(y_test_pred_la, dtype=float) if y_test_pred_la is not None else None,
+                        "_la_cv_scores":   {"R²": cv_r2_l, "RMSE": cv_rmse_l, "MAE": cv_mae_l},
                     })
 
                 n, p = len(y_fi), X_fi.shape[1]
@@ -611,6 +634,8 @@ def _render_lasso_tab(fi_subtab, X_fi, y_fi, top_n_fi):
                     "Lasso Regression",
                     st.session_state["_la_y"],
                     st.session_state["_la_y_pred"],
+                    y_test=st.session_state.get("_la_y_test"),
+                    y_test_pred=st.session_state.get("_la_y_test_pred"),
                     cv_scores=st.session_state.get("_la_cv_scores"),
                     n_features=X_fi.shape[1],
                 )
@@ -1012,6 +1037,15 @@ def _render_pls_tab(fi_subtab, X_fi, y_fi, top_n_fi):
                     y_var_each = ([y_var_per_comp[0]] +
                                   [y_var_per_comp[i]-y_var_per_comp[i-1] for i in range(1, n_pls)])
 
+                    # Test set 預測（若有 split）
+                    X_te_pls = st.session_state.get("fi_X_test")
+                    y_te_pls = st.session_state.get("fi_y_test")
+                    if X_te_pls is not None and y_te_pls is not None:
+                        X_te_pls_arr = scaler_pls.transform(X_te_pls) if scaler_pls else X_te_pls.values
+                        y_test_pred_pls = pls.predict(X_te_pls_arr).ravel()
+                    else:
+                        y_test_pred_pls = None
+
                     st.session_state.update({
                         "pls_vip_df": vip_df, "pls_reg_coef_df": reg_coef_df,
                         "pls_x_loadings": x_load, "pls_x_weights": x_weights,
@@ -1019,8 +1053,10 @@ def _render_pls_tab(fi_subtab, X_fi, y_fi, top_n_fi):
                         "pls_y_var_each": y_var_each, "pls_model": pls,
                         "pls_n_comp": n_pls,
                         # eval cache
-                        "_pls_y":         np.asarray(y_fi, dtype=float),
-                        "_pls_y_pred":    y_pred_pls,
+                        "_pls_y":            np.asarray(y_fi, dtype=float),
+                        "_pls_y_pred":       y_pred_pls,
+                        "_pls_y_test":       np.asarray(y_te_pls,         dtype=float) if y_te_pls is not None else None,
+                        "_pls_y_test_pred":  np.asarray(y_test_pred_pls,  dtype=float) if y_test_pred_pls is not None else None,
                         "_pls_cv_scores": {
                             "R² (Q²-fold)": np.array(q2_scores),
                             "RMSE": np.array(cv_rmse_p),
@@ -1120,6 +1156,8 @@ def _render_pls_tab(fi_subtab, X_fi, y_fi, top_n_fi):
                     "PLS Regression",
                     st.session_state["_pls_y"],
                     st.session_state["_pls_y_pred"],
+                    y_test=st.session_state.get("_pls_y_test"),
+                    y_test_pred=st.session_state.get("_pls_y_test_pred"),
                     cv_scores=st.session_state.get("_pls_cv_scores"),
                     n_features=X_fi.shape[1],
                 )
@@ -1415,20 +1453,55 @@ def render(selected_process_df):
     target_col_fi = st.selectbox("目標欄位（Y）", numeric_cols, index=default_fi, key="fi_target")
     top_n_fi      = st.slider("顯示前 N 個特徵", 5, 30, 15, key="fi_topn")
 
+    # ── Train / Test Split 設定 ───────────────────────────
+    with st.expander("✂️ Train / Test Split 設定", expanded=False):
+        st.caption(
+            "設定 > 0 會切出獨立 Test Set，模型評估頁將顯示 Train + Test 點估計與並列圖表。"
+            "設為 0 則全資料訓練，模型評估頁改以 K-Fold CV 為主要泛化指標。"
+        )
+        test_size_pct = st.slider(
+            "Test Set 比例（%）", min_value=0, max_value=40, value=0, step=5,
+            key="fi_test_size_pct",
+            help="0 = 不切分，全資料訓練；建議值 20～30%"
+        )
+        if test_size_pct > 0:
+            st.info(f"將保留 **{test_size_pct}%** 資料作為 Test Set（random_state=42）。")
+        else:
+            st.info("目前設定：**全資料訓練**，K-Fold CV 作為泛化評估主角。")
+
     if st.button("📦 準備資料", key="run_fi_prepare"):
+        from sklearn.model_selection import train_test_split as _tts
         try:
             exclude = [c for c in ["BatchID", target_col_fi] if c in work_df.columns]
-            X_fi = work_df.drop(columns=exclude, errors="ignore").select_dtypes(include=["number"])
-            y_fi = work_df[target_col_fi]
-            valid = y_fi.notna() & X_fi.notna().all(axis=1)
-            X_fi = X_fi[valid].reset_index(drop=True)
-            y_fi = y_fi[valid].reset_index(drop=True)
+            X_all = work_df.drop(columns=exclude, errors="ignore").select_dtypes(include=["number"])
+            y_all = work_df[target_col_fi]
+            valid = y_all.notna() & X_all.notna().all(axis=1)
+            X_all = X_all[valid].reset_index(drop=True)
+            y_all = y_all[valid].reset_index(drop=True)
+
+            if test_size_pct > 0:
+                X_tr, X_te, y_tr, y_te = _tts(
+                    X_all, y_all, test_size=test_size_pct/100, random_state=42)
+                X_tr = X_tr.reset_index(drop=True)
+                X_te = X_te.reset_index(drop=True)
+                y_tr = y_tr.reset_index(drop=True)
+                y_te = y_te.reset_index(drop=True)
+                st.success(
+                    f"✅ 資料準備完成：Train {X_tr.shape[0]} 筆 / Test {X_te.shape[0]} 筆"
+                    f" × {X_tr.shape[1]} 特徵"
+                )
+            else:
+                X_tr, y_tr = X_all, y_all
+                X_te, y_te = None, None
+                st.success(f"✅ 資料準備完成（全資料）：{X_tr.shape[0]} 筆 × {X_tr.shape[1]} 特徵")
+
             st.session_state.update({
-                "fi_X": X_fi, "fi_y": y_fi, "fi_target_col": target_col_fi,
+                "fi_X": X_tr, "fi_y": y_tr,
+                "fi_X_test": X_te, "fi_y_test": y_te,
+                "fi_target_col": target_col_fi,
                 "fi_rf": None, "shap_vals": None,
                 "lasso_coef_df": None, "pls_vip_df": None,
             })
-            st.success(f"✅ 資料準備完成：{X_fi.shape[0]} 筆 × {X_fi.shape[1]} 特徵")
         except Exception as e:
             st.error(f"失敗：{e}")
 
