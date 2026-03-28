@@ -469,13 +469,13 @@ def _render_rf_tab(fi_subtab, X_fi, y_fi, top_n_fi):
 
         # ── Sub-tab 1: eval ──────────────────────────────
         with rf_subtabs[1]:
-            if st.session_state.get("fi_rf") is None:
+            if st.session_state.get("fi_rf") is None or st.session_state.get("_rf_y") is None:
                 st.info("請先在「🌲 重要性分析」分頁訓練 RF 模型。")
             else:
                 _render_eval_section(
                     "Random Forest",
-                    st.session_state["_rf_y"],
-                    st.session_state["_rf_y_pred"],
+                    st.session_state.get("_rf_y"),
+                    st.session_state.get("_rf_y_pred"),
                     y_test=st.session_state.get("_rf_y_test"),
                     y_test_pred=st.session_state.get("_rf_y_test_pred"),
                     cv_scores=st.session_state.get("_rf_cv_scores"),
@@ -627,13 +627,13 @@ def _render_lasso_tab(fi_subtab, X_fi, y_fi, top_n_fi):
                     plt.tight_layout(); st.pyplot(fig); plt.close()
 
         with la_subtabs[1]:
-            if st.session_state.get("lasso_model") is None:
+            if st.session_state.get("lasso_model") is None or st.session_state.get("_la_y") is None:
                 st.info("請先在「🔪 係數分析」分頁執行 Lasso。")
             else:
                 _render_eval_section(
                     "Lasso Regression",
-                    st.session_state["_la_y"],
-                    st.session_state["_la_y_pred"],
+                    st.session_state.get("_la_y"),
+                    st.session_state.get("_la_y_pred"),
                     y_test=st.session_state.get("_la_y_test"),
                     y_test_pred=st.session_state.get("_la_y_test_pred"),
                     cv_scores=st.session_state.get("_la_cv_scores"),
@@ -1149,13 +1149,13 @@ def _render_pls_tab(fi_subtab, X_fi, y_fi, top_n_fi):
                 plt.tight_layout(); st.pyplot(fig); plt.close()
 
         with pls_outer[1]:
-            if st.session_state.get("pls_model") is None:
+            if st.session_state.get("pls_model") is None or st.session_state.get("_pls_y") is None:
                 st.info("請先在「📐 VIP 分析」分頁訓練 PLS 模型。")
             else:
                 _render_eval_section(
                     "PLS Regression",
-                    st.session_state["_pls_y"],
-                    st.session_state["_pls_y_pred"],
+                    st.session_state.get("_pls_y"),
+                    st.session_state.get("_pls_y_pred"),
                     y_test=st.session_state.get("_pls_y_test"),
                     y_test_pred=st.session_state.get("_pls_y_test_pred"),
                     cv_scores=st.session_state.get("_pls_cv_scores"),
