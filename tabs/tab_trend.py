@@ -21,6 +21,31 @@ from scipy import stats as sp_stats
 from utils import extract_number
 
 
+# ──────────────────────────────────────────────────────────
+# 平滑化 Helper Functions
+# ──────────────────────────────────────────────────────────
+
+def _ewma_smooth(y: np.ndarray, span: int) -> np.ndarray:
+    """EWMA（指數加權移動平均）平滑，忽略 NaN。"""
+    s = pd.Series(y).ewm(span=span, adjust=True).mean().values
+    return s
+
+
+def _loess_smooth(x: np.ndarray, y: np.ndarray, frac: float) -> np.ndarray:
+    """LOESS（局部加權迴歸）平滑，回傳與 y 等長的平滑值。"""
+    try:
+        from statsmodels.nonparametric.smoothers_lowess import lowess
+    except ImportError:
+        return y  # statsmodels 未安裝時直接回原始值
+    mask = ~np.isnan(y)
+    if mask.sum() < 4:
+        return y
+    smoothed = np.full_like(y, np.nan)
+    result = lowess(y[mask], x[mask], frac=frac, return_sorted=False)
+    smoothed[mask] = result
+    return smoothed
+
+
 def _sort_by_batch(df, batch_col="BatchID"):
     out = df.copy()
     if batch_col in out.columns:
@@ -75,6 +100,36 @@ def render(selected_process_df):
         show_mean    = tr3.checkbox("顯示平均線", value=True, key="trend_mean")
         show_sigma   = tr3.checkbox("顯示 ±1σ 色帶", value=True, key="trend_sigma")
 
+        # ── 平滑化設定 ────────────────────────────────────────
+        with st.expander("〰️ 平滑化設定", expanded=False):
+            sm_c1, sm_c2, sm_c3 = st.columns(3)
+            smooth_method = sm_c1.radio(
+                "平滑化方法",
+                ["無", "EWMA", "LOESS"],
+                horizontal=True,
+                key="trend_smooth_method",
+                help="EWMA：指數加權移動平均，適合快速追蹤趨勢。LOESS：局部加權迴歸，適合捕捉非線性趨勢，較慢。"
+            )
+            ewma_span = sm_c2.slider(
+                "EWMA span（越小越敏感）", 2, 30, 5, key="trend_ewma_span",
+                disabled=(smooth_method != "EWMA"),
+            )
+            loess_frac = sm_c3.slider(
+                "LOESS frac（越小越貼合）", 0.10, 0.90, 0.30, 0.05,
+                key="trend_loess_frac",
+                disabled=(smooth_method != "LOESS"),
+            )
+            show_raw = sm_c1.checkbox(
+                "同時顯示原始線", value=True, key="trend_show_raw",
+                disabled=(smooth_method == "無"),
+            )
+            if smooth_method != "無":
+                st.caption(
+                    "🔵 細線 = 原始資料（若勾選）　｜　🔴 粗線 = 平滑曲線"
+                    if show_raw else
+                    "只顯示平滑曲線（原始線已隱藏）"
+                )
+
         if not sel_cols:
             st.warning("請選擇至少一個欄位。")
         elif st.button("📈 繪製趨勢圖", key="run_trend"):
@@ -102,9 +157,24 @@ def render(selected_process_df):
                     axes[i].axhline(mu, color=color, linewidth=1.2, linestyle="--",
                                     alpha=0.80, label=f"Mean={mu:.3f}", zorder=1)
 
-                axes[i].plot(x, y, color=color, linewidth=1.5, zorder=2)
-                axes[i].scatter(x, y, color=color, s=22, zorder=3,
-                                edgecolors="white", linewidths=0.4)
+                # ── 原始線 ──────────────────────────────────
+                if smooth_method == "無" or show_raw:
+                    raw_alpha = 0.35 if smooth_method != "無" else 1.0
+                    raw_lw    = 1.0  if smooth_method != "無" else 1.5
+                    axes[i].plot(x, y, color=color, linewidth=raw_lw,
+                                 alpha=raw_alpha, zorder=2, label="原始" if smooth_method != "無" else None)
+                    axes[i].scatter(x, y, color=color, s=22, zorder=3,
+                                    edgecolors="white", linewidths=0.4, alpha=raw_alpha)
+
+                # ── 平滑化線 ────────────────────────────────
+                if smooth_method == "EWMA":
+                    y_sm = _ewma_smooth(y, span=ewma_span)
+                    axes[i].plot(x, y_sm, color=color, linewidth=2.5,
+                                 zorder=4, label=f"EWMA(span={ewma_span})")
+                elif smooth_method == "LOESS":
+                    y_sm = _loess_smooth(x.astype(float), y, frac=loess_frac)
+                    axes[i].plot(x, y_sm, color=color, linewidth=2.5,
+                                 zorder=4, label=f"LOESS(frac={loess_frac})")
 
                 for j, val in enumerate(y):
                     if np.isnan(val):
@@ -119,7 +189,7 @@ def render(selected_process_df):
                                    fontsize=8.5, color=color)
                 axes[i].set_ylabel("Value", fontsize=8)
                 axes[i].grid(linestyle="--", alpha=0.35)
-                if show_mean:
+                if show_mean or smooth_method != "無":
                     axes[i].legend(fontsize=7, loc="upper right", framealpha=0.7)
 
             for j in range(len(sel_cols), len(axes)):
@@ -278,9 +348,33 @@ def render(selected_process_df):
         mv_cols = st.multiselect("選擇欄位（2–8 個）", non_batch,
                                   default=non_batch[:min(3, len(non_batch))],
                                   key="mv_cols")
-        mv_mean = st.checkbox("顯示平均線", value=True, key="mv_mean")
-        mv_norm = st.checkbox("Z-score 標準化（方便比較量綱不同的欄位）",
-                               value=True, key="mv_norm")
+        mv_c1, mv_c2 = st.columns(2)
+        mv_mean = mv_c1.checkbox("顯示平均線", value=True, key="mv_mean")
+        mv_norm = mv_c2.checkbox("Z-score 標準化（方便比較量綱不同的欄位）",
+                                  value=True, key="mv_norm")
+
+        # ── 平滑化設定 ────────────────────────────────────────
+        with st.expander("〰️ 平滑化設定", expanded=False):
+            mv_sm_c1, mv_sm_c2, mv_sm_c3 = st.columns(3)
+            mv_smooth_method = mv_sm_c1.radio(
+                "平滑化方法",
+                ["無", "EWMA", "LOESS"],
+                horizontal=True,
+                key="mv_smooth_method",
+            )
+            mv_ewma_span = mv_sm_c2.slider(
+                "EWMA span", 2, 30, 5, key="mv_ewma_span",
+                disabled=(mv_smooth_method != "EWMA"),
+            )
+            mv_loess_frac = mv_sm_c3.slider(
+                "LOESS frac", 0.10, 0.90, 0.30, 0.05,
+                key="mv_loess_frac",
+                disabled=(mv_smooth_method != "LOESS"),
+            )
+            mv_show_raw = mv_sm_c1.checkbox(
+                "同時顯示原始線", value=True, key="mv_show_raw",
+                disabled=(mv_smooth_method == "無"),
+            )
 
         if len(mv_cols) >= 2 and st.button("🔀 繪製對比圖", key="run_mv"):
             plot_df = _sort_by_batch(work_df.copy())
@@ -296,16 +390,32 @@ def render(selected_process_df):
 
                 if mv_norm:
                     mu, sd = np.nanmean(y), np.nanstd(y, ddof=1)
-                    y_plot = (y - mu) / sd if sd > 0 else y - mu
+                    y_plot_val = (y - mu) / sd if sd > 0 else y - mu
                 else:
-                    y_plot = y
+                    y_plot_val = y
 
-                ax.plot(x, y_plot, color=color, linewidth=1.5, label=col[:35], zorder=2)
-                ax.scatter(x, y_plot, color=color, s=18, zorder=3,
-                           edgecolors="white", linewidths=0.3, alpha=0.85)
+                # ── 原始線 ──────────────────────────────────
+                if mv_smooth_method == "無" or mv_show_raw:
+                    raw_alpha = 0.30 if mv_smooth_method != "無" else 1.0
+                    raw_lw    = 0.9  if mv_smooth_method != "無" else 1.5
+                    ax.plot(x, y_plot_val, color=color, linewidth=raw_lw,
+                            alpha=raw_alpha, zorder=2,
+                            label=col[:35] if mv_smooth_method == "無" else f"{col[:25]}（原始）")
+                    ax.scatter(x, y_plot_val, color=color, s=18, zorder=3,
+                               edgecolors="white", linewidths=0.3, alpha=raw_alpha * 0.85)
+
+                # ── 平滑化線 ────────────────────────────────
+                if mv_smooth_method == "EWMA":
+                    y_sm = _ewma_smooth(y_plot_val, span=mv_ewma_span)
+                    ax.plot(x, y_sm, color=color, linewidth=2.5, zorder=4,
+                            label=f"{col[:25]} EWMA")
+                elif mv_smooth_method == "LOESS":
+                    y_sm = _loess_smooth(x.astype(float), y_plot_val, frac=mv_loess_frac)
+                    ax.plot(x, y_sm, color=color, linewidth=2.5, zorder=4,
+                            label=f"{col[:25]} LOESS")
 
                 if mv_mean:
-                    mu_p = np.nanmean(y_plot)
+                    mu_p = np.nanmean(y_plot_val)
                     ax.axhline(mu_p, color=color, linewidth=0.9, linestyle=":",
                                alpha=0.70)
 
@@ -314,8 +424,14 @@ def render(selected_process_df):
                 ax.set_xticklabels([str(b)[-6:] for b in plot_df["BatchID"]],
                                     rotation=90, fontsize=6)
 
+            smooth_tag = "" if mv_smooth_method == "無" else f"＋{mv_smooth_method}"
             ax.set_ylabel("Z-score" if mv_norm else "Value", fontsize=10)
-            ax.set_title("多欄位趨勢對比" + ("（Z-score 標準化）" if mv_norm else ""), fontsize=12)
+            ax.set_title(
+                "多欄位趨勢對比"
+                + ("（Z-score 標準化）" if mv_norm else "")
+                + smooth_tag,
+                fontsize=12,
+            )
             ax.legend(fontsize=8, loc="upper right", framealpha=0.8,
                       ncol=min(len(mv_cols), 4))
             ax.grid(linestyle="--", alpha=0.35)
