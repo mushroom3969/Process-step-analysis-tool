@@ -1051,7 +1051,7 @@ def _render_pls_tab(fi_subtab, X_fi, y_fi, top_n_fi):
                         "pls_x_loadings": x_load, "pls_x_weights": x_weights,
                         "pls_r2": r2_pls, "pls_q2": q2_pls,
                         "pls_y_var_each": y_var_each, "pls_model": pls,
-                        "pls_n_comp": n_pls,
+                        "pls_n_comp_val": n_pls,
                         # eval cache
                         "_pls_y":            np.asarray(y_fi, dtype=float),
                         "_pls_y_pred":       y_pred_pls,
@@ -1081,7 +1081,7 @@ def _render_pls_tab(fi_subtab, X_fi, y_fi, top_n_fi):
             r2_pls      = st.session_state["pls_r2"]
             q2_pls      = st.session_state.get("pls_q2")
             y_var_each  = st.session_state.get("pls_y_var_each", [])
-            n_pls       = st.session_state.get("pls_n_comp", 3)
+            n_pls       = st.session_state.get("pls_n_comp_val", st.session_state.get("pls_n_comp", 3))
 
             n, p_ = len(y_fi), X_fi.shape[1]
             adj   = _adj_r2(r2_pls, n, p_)
