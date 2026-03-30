@@ -374,11 +374,394 @@ def _sig_label(p: float) -> str:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# ── 連續型 vs 連續型 相關性分析 ───────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _distance_correlation(x: np.ndarray, y: np.ndarray, n_perm: int = 999) -> tuple[float, float]:
+    """計算 Distance Correlation 及排列檢定 p-value。"""
+    def _centered_dist(v: np.ndarray) -> np.ndarray:
+        d = np.abs(np.subtract.outer(v, v))
+        row_m  = d.mean(axis=1, keepdims=True)
+        col_m  = d.mean(axis=0, keepdims=True)
+        grand  = d.mean()
+        return d - row_m - col_m + grand
+
+    A = _centered_dist(x)
+    B = _centered_dist(y)
+    dcov2_xy = (A * B).mean()
+    dcov2_xx = (A * A).mean()
+    dcov2_yy = (B * B).mean()
+    denom = np.sqrt(dcov2_xx * dcov2_yy)
+    if denom <= 0:
+        return np.nan, np.nan
+    dc = float(np.sqrt(max(dcov2_xy / denom, 0)))
+
+    # 排列檢定
+    rng = np.random.default_rng(42)
+    count = sum(
+        1 for _ in range(n_perm)
+        if float(np.sqrt(max((A * _centered_dist(rng.permutation(y))).mean() / denom, 0))) >= dc
+    )
+    p_val = (count + 1) / (n_perm + 1)
+    return dc, p_val
+
+
+def _run_continuous_correlation(x: np.ndarray, y: np.ndarray, n_perm: int = 999) -> dict:
+    """執行線性與非線性相關性檢定，回傳彙整結果。"""
+    mask = ~(np.isnan(x) | np.isnan(y))
+    x, y = x[mask], y[mask]
+    n = len(x)
+    if n < 3:
+        return {"n": n, "tests": [], "poly_r2": None, "error": "樣本數不足（需 ≥ 3）"}
+
+    rows = []
+
+    # ── 1. Pearson r（線性）──────────────────────────────────
+    try:
+        r_p, p_p = stats.pearsonr(x, y)
+        rows.append({
+            "方法": "Pearson r", "類型": "線性",
+            "係數": round(float(r_p), 4), "p-value": round(float(p_p), 4),
+            "顯著性": "***" if p_p < 0.001 else "**" if p_p < 0.01 else "*" if p_p < 0.05 else "ns",
+            "效果量": _interpret_r(r_p),
+        })
+    except Exception as e:
+        rows.append({"方法": "Pearson r", "類型": "線性", "係數": None,
+                     "p-value": None, "顯著性": "—", "效果量": f"失敗: {e}"})
+
+    # ── 2. Spearman ρ（單調非線性）──────────────────────────
+    try:
+        r_s, p_s = stats.spearmanr(x, y)
+        rows.append({
+            "方法": "Spearman ρ", "類型": "非線性（單調）",
+            "係數": round(float(r_s), 4), "p-value": round(float(p_s), 4),
+            "顯著性": "***" if p_s < 0.001 else "**" if p_s < 0.01 else "*" if p_s < 0.05 else "ns",
+            "效果量": _interpret_r(r_s),
+        })
+    except Exception as e:
+        rows.append({"方法": "Spearman ρ", "類型": "非線性（單調）", "係數": None,
+                     "p-value": None, "顯著性": "—", "效果量": f"失敗: {e}"})
+
+    # ── 3. Kendall τ（排序相關）─────────────────────────────
+    try:
+        r_k, p_k = stats.kendalltau(x, y)
+        rows.append({
+            "方法": "Kendall τ", "類型": "非線性（排序）",
+            "係數": round(float(r_k), 4), "p-value": round(float(p_k), 4),
+            "顯著性": "***" if p_k < 0.001 else "**" if p_k < 0.01 else "*" if p_k < 0.05 else "ns",
+            "效果量": _interpret_r(r_k),
+        })
+    except Exception as e:
+        rows.append({"方法": "Kendall τ", "類型": "非線性（排序）", "係數": None,
+                     "p-value": None, "顯著性": "—", "效果量": f"失敗: {e}"})
+
+    # ── 4. Distance Correlation（任意非線性）─────────────────
+    try:
+        dc, p_dc = _distance_correlation(x, y, n_perm=n_perm)
+        rows.append({
+            "方法": "Distance Correlation", "類型": "非線性（任意）",
+            "係數": round(dc, 4) if not np.isnan(dc) else None,
+            "p-value": round(p_dc, 4) if not np.isnan(p_dc) else None,
+            "顯著性": (
+                "***" if p_dc < 0.001 else "**" if p_dc < 0.01
+                else "*" if p_dc < 0.05 else "ns"
+            ) if not np.isnan(p_dc) else "—",
+            "效果量": _interpret_r(dc) if not np.isnan(dc) else "—",
+            "備注": f"排列檢定 ({n_perm} 次)",
+        })
+    except Exception as e:
+        rows.append({"方法": "Distance Correlation", "類型": "非線性（任意）",
+                     "係數": None, "p-value": None, "顯著性": "—",
+                     "效果量": f"失敗: {e}"})
+
+    # ── 多項式 R² ────────────────────────────────────────────
+    poly_r2 = None
+    try:
+        ss_tot = np.sum((y - y.mean()) ** 2)
+        if ss_tot > 0:
+            p1 = np.polyfit(x, y, 1)
+            r2_lin = 1 - np.sum((y - np.polyval(p1, x)) ** 2) / ss_tot
+            p2 = np.polyfit(x, y, 2)
+            r2_quad = 1 - np.sum((y - np.polyval(p2, x)) ** 2) / ss_tot
+            poly_r2 = {
+                "linear_R2": round(float(r2_lin), 4),
+                "quadratic_R2": round(float(r2_quad), 4),
+                "linear_coef": p1.tolist(),
+                "quadratic_coef": p2.tolist(),
+            }
+    except Exception:
+        poly_r2 = None
+
+    return {"n": n, "tests": rows, "poly_r2": poly_r2, "x_clean": x, "y_clean": y}
+
+
+def _plot_scatter_regression(x: np.ndarray, y: np.ndarray,
+                              x_col: str, y_col: str, poly_r2: dict | None = None):
+    """散點圖 + 線性/二次迴歸線。"""
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.scatter(x, y, alpha=0.55, s=40, color="#2e86ab",
+               edgecolor="white", linewidth=0.4, label="資料點")
+
+    x_line = np.linspace(x.min(), x.max(), 300)
+
+    if poly_r2:
+        # 線性
+        y1 = np.polyval(poly_r2["linear_coef"], x_line)
+        ax.plot(x_line, y1, color="#e84855", linewidth=2,
+                label=f"Linear fit  R²={poly_r2['linear_R2']}")
+        # 二次
+        y2 = np.polyval(poly_r2["quadratic_coef"], x_line)
+        ax.plot(x_line, y2, color="#f4a261", linewidth=2, linestyle="--",
+                label=f"Quadratic fit  R²={poly_r2['quadratic_R2']}")
+
+    ax.set_xlabel(x_col[:60], fontsize=11)
+    ax.set_ylabel(y_col[:60], fontsize=11)
+    ax.set_title(f"Scatter: {x_col[:35]} vs {y_col[:35]}", fontsize=12)
+    ax.legend(fontsize=9)
+    ax.grid(linestyle="--", alpha=0.35)
+    plt.tight_layout()
+    return fig
+
+
+def _plot_corr_bar(test_rows: list):
+    """橫條圖比較各方法的相關係數。"""
+    df = pd.DataFrame(test_rows).dropna(subset=["係數"]).copy()
+    if df.empty:
+        return None
+    df["係數"] = df["係數"].astype(float)
+    df = df.sort_values("係數", key=abs, ascending=True)   # 小→大，barh 由上到下
+
+    colors = [
+        "#e84855" if abs(v) >= 0.5 else "#f4a261" if abs(v) >= 0.3 else "#90e0ef"
+        for v in df["係數"]
+    ]
+    fig, ax = plt.subplots(figsize=(9, max(3, len(df) * 0.9 + 1)))
+    bars = ax.barh(df["方法"], df["係數"], color=colors, alpha=0.85, edgecolor="white")
+    ax.axvline(0, color="black", linewidth=0.8)
+
+    for bar, (_, row) in zip(bars, df.iterrows()):
+        offset = 0.03 if bar.get_width() >= 0 else -0.03
+        ha     = "left" if bar.get_width() >= 0 else "right"
+        ax.text(bar.get_width() + offset,
+                bar.get_y() + bar.get_height() / 2,
+                f"{row['係數']:.3f}  {row['顯著性']}",
+                va="center", ha=ha, fontsize=9)
+
+    ax.set_xlabel("相關係數", fontsize=11)
+    ax.set_title("各方法相關係數比較", fontsize=12)
+    ax.set_xlim(-1.25, 1.25)
+    ax.axvline( 0.3, color="#f4a261", linestyle=":", lw=1.2, label="Small (0.3)")
+    ax.axvline(-0.3, color="#f4a261", linestyle=":", lw=1.2)
+    ax.axvline( 0.5, color="#e84855", linestyle=":", lw=1.2, label="Medium (0.5)")
+    ax.axvline(-0.5, color="#e84855", linestyle=":", lw=1.2)
+    ax.legend(fontsize=8, loc="lower right")
+    ax.grid(axis="x", linestyle="--", alpha=0.4)
+    plt.tight_layout()
+    return fig
+
+
+def _render_continuous_correlation(work_df, numeric_cols):
+    """連續型 vs 連續型 相關性分析 UI。"""
+    st.markdown("### 📈 連續型 vs 連續型 相關性分析")
+    st.markdown("""
+    <div class="info-box">
+    選擇兩個連續型欄位，同時計算 <b>線性</b>（Pearson r）與<b>非線性</b>
+    （Spearman ρ、Kendall τ、Distance Correlation）相關係數及其 p-value。
+    </div>
+    """, unsafe_allow_html=True)
+
+    if work_df is None or len(numeric_cols) < 2:
+        st.warning("請先在側欄選擇製程步驟並確保至少有兩個數值欄位。")
+        return
+
+    cc1, cc2 = st.columns(2)
+    x_col = cc1.selectbox("🔵 X 欄位", numeric_cols, key="cont_x_col")
+    y_col = cc2.selectbox(
+        "🟠 Y 欄位",
+        [c for c in numeric_cols if c != x_col],
+        key="cont_y_col",
+    )
+
+    adv_col1, adv_col2 = st.columns(2)
+    n_perm = adv_col1.select_slider(
+        "Distance Correlation 排列次數",
+        options=[199, 499, 999, 1999],
+        value=999,
+        key="cont_n_perm",
+    )
+    adv_col2.markdown(" ")  # spacer
+
+    if st.button("🚀 執行相關性分析", type="primary", key="run_cont_corr"):
+        x_arr = work_df[x_col].values.astype(float)
+        y_arr = work_df[y_col].values.astype(float)
+        with st.spinner(f"計算中（排列次數 {n_perm}，請稍候）…"):
+            try:
+                corr_res = _run_continuous_correlation(x_arr, y_arr, n_perm=n_perm)
+            except Exception as e:
+                st.error(f"分析失敗：{e}")
+                import traceback; st.code(traceback.format_exc())
+                return
+        st.session_state.update({
+            "cont_corr_res": corr_res,
+            "cont_x_col_used": x_col,
+            "cont_y_col_used": y_col,
+        })
+        st.success("✅ 分析完成！")
+
+    # ── 顯示結果 ──────────────────────────────────────────────
+    corr_res = st.session_state.get("cont_corr_res")
+    if corr_res is None:
+        return
+
+    x_col_used = st.session_state.get("cont_x_col_used", x_col)
+    y_col_used = st.session_state.get("cont_y_col_used", y_col)
+
+    if corr_res.get("error"):
+        st.error(corr_res["error"])
+        return
+
+    x_clean = corr_res["x_clean"]
+    y_clean = corr_res["y_clean"]
+    n       = corr_res["n"]
+    tests   = corr_res["tests"]
+    poly_r2 = corr_res.get("poly_r2")
+
+    ctabs = st.tabs(["📋 相關係數表", "📊 視覺化", "📈 迴歸擬合", "ℹ️ 方法說明"])
+
+    # ── Tab 0: 係數表 ─────────────────────────────────────────
+    with ctabs[0]:
+        st.markdown(f"#### 📋 相關係數彙整表（n = {n}）")
+
+        test_df = pd.DataFrame(tests)
+        # 顏色標示顯著欄位
+        def _style_corr(df):
+            def _row_color(row):
+                sig = str(row.get("顯著性", ""))
+                if "***" in sig or "**" in sig or "*" in sig:
+                    return ["background-color: #d4edda"] * len(row)
+                return [""] * len(row)
+            return df.style.apply(_row_color, axis=1)
+
+        st.dataframe(_style_corr(test_df), use_container_width=True, hide_index=True)
+
+        # 顯著性標示說明
+        st.caption("顯著性：*** p<0.001　** p<0.01　* p<0.05　ns 不顯著")
+        st.caption("效果量：Negligible |r|<0.1　Small <0.3　Medium <0.5　Large ≥0.5")
+
+        # R² 比較
+        if poly_r2:
+            st.markdown("---")
+            st.markdown("**多項式擬合 R²（非線性程度參考）**")
+            rc1, rc2 = st.columns(2)
+            rc1.metric("Linear R²",    f"{poly_r2['linear_R2']:.4f}")
+            rc2.metric("Quadratic R²", f"{poly_r2['quadratic_R2']:.4f}")
+            delta = poly_r2["quadratic_R2"] - poly_r2["linear_R2"]
+            if delta > 0.02:
+                st.info(f"💡 二次項 R² 比線性高出 {delta:.4f}，資料可能存在**曲線性（非線性）**關係，建議優先參考 Spearman / Distance Correlation。")
+            else:
+                st.info(f"💡 線性與二次 R² 差距小（Δ={delta:.4f}），資料主要呈**線性**關係，Pearson r 參考性高。")
+
+    # ── Tab 1: 視覺化 ─────────────────────────────────────────
+    with ctabs[1]:
+        st.markdown("#### 📊 相關係數比較圖")
+        fig_bar = _plot_corr_bar(tests)
+        if fig_bar:
+            st.pyplot(fig_bar); plt.close()
+        else:
+            st.warning("無法繪製（所有方法均計算失敗）。")
+
+        # Heatmap of 2x2 coefficients (just the r values)
+        valid_tests = [t for t in tests if t.get("係數") is not None]
+        if len(valid_tests) >= 2:
+            st.markdown("---")
+            st.markdown("**相關係數 p-value 比較**")
+            p_df = pd.DataFrame(valid_tests)[["方法", "係數", "p-value", "顯著性", "效果量"]]
+            fig_p, ax_p = plt.subplots(figsize=(9, 3.5))
+            methods = p_df["方法"].tolist()
+            coefs   = p_df["係數"].astype(float).tolist()
+            pvals   = p_df["p-value"].astype(float).tolist()
+            x_pos   = np.arange(len(methods))
+            bar_colors = ["#d4edda" if pv < 0.05 else "#f8d7da" for pv in pvals]
+            ax_p.bar(x_pos, pvals, color=bar_colors, edgecolor="white", alpha=0.85)
+            ax_p.axhline(0.05, color="#e84855", linestyle="--", lw=1.5, label="α = 0.05")
+            ax_p.axhline(0.01, color="#f4a261", linestyle="--", lw=1.2, label="α = 0.01")
+            for xi, pv in zip(x_pos, pvals):
+                ax_p.text(xi, pv + 0.002, f"{pv:.4f}", ha="center", va="bottom", fontsize=9)
+            ax_p.set_xticks(x_pos)
+            ax_p.set_xticklabels(methods, fontsize=10)
+            ax_p.set_ylabel("p-value", fontsize=11)
+            ax_p.set_title("各方法 p-value（綠色 = 顯著 p < 0.05）", fontsize=11)
+            ax_p.legend(fontsize=9)
+            ax_p.grid(axis="y", linestyle="--", alpha=0.4)
+            plt.tight_layout()
+            st.pyplot(fig_p); plt.close()
+
+    # ── Tab 2: 迴歸擬合 ──────────────────────────────────────
+    with ctabs[2]:
+        st.markdown("#### 📈 散點圖 + 迴歸擬合線")
+        fig_sc = _plot_scatter_regression(x_clean, y_clean, x_col_used, y_col_used, poly_r2)
+        st.pyplot(fig_sc); plt.close()
+
+        if poly_r2:
+            lin_c = poly_r2["linear_coef"]
+            quad_c = poly_r2["quadratic_coef"]
+            st.caption(
+                f"Linear:    y = {lin_c[0]:.4f}·x + {lin_c[1]:.4f}  |  "
+                f"Quadratic: y = {quad_c[0]:.4f}·x² + {quad_c[1]:.4f}·x + {quad_c[2]:.4f}"
+            )
+
+    # ── Tab 3: 方法說明 ──────────────────────────────────────
+    with ctabs[3]:
+        st.markdown("#### ℹ️ 各方法說明")
+        st.markdown("""
+| 方法 | 類型 | 適用情境 | p-value 來源 |
+|---|---|---|---|
+| **Pearson r** | 線性 | 兩變數近似常態、線性關係 | t 分佈 |
+| **Spearman ρ** | 非線性（單調） | 順序/排序關係、有離群值 | t 分佈（近似） |
+| **Kendall τ** | 非線性（排序） | 樣本小、有大量並列值 | 常態近似 |
+| **Distance Correlation** | 非線性（任意） | 非單調、複雜非線性關係，值域 [0,1] | 排列檢定（Permutation Test） |
+
+**解讀建議：**
+- 若 Pearson r ≈ Spearman ρ ≈ Kendall τ → 關係接近**線性**
+- 若 Spearman ρ >> Pearson r → 存在**單調非線性**關係
+- 若 Distance Correlation 顯著但其他不顯著 → 可能存在**複雜/非單調非線性**關係
+- Distance Correlation = 0 **等價於統計獨立**（Pearson r = 0 不代表獨立）
+
+**效果量標準（Cohen, 1988）：**
+- Negligible：|r| < 0.1　Small：0.1 ≤ |r| < 0.3　Medium：0.3 ≤ |r| < 0.5　Large：|r| ≥ 0.5
+""")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # ── 主 render ─────────────────────────────────────────────────────────────────
 # ══════════════════════════════════════════════════════════════════════════════
 
 def render(selected_process_df):
     st.header("📐 統計檢定分析")
+
+    # ── 頂層分析模式選擇 ─────────────────────────────────────
+    analysis_mode = st.radio(
+        "分析模式",
+        ["📦 分類 vs 連續（組間比較）", "📈 連續型 vs 連續型（相關性檢定）"],
+        horizontal=True,
+        key="stat_analysis_mode",
+    )
+
+    _cd = st.session_state.get("clean_df")
+    work_df_top = _cd if _cd is not None else selected_process_df
+    numeric_cols_top = (
+        work_df_top.select_dtypes(include=["number"]).columns.tolist()
+        if work_df_top is not None else []
+    )
+
+    # ── 連續型 vs 連續型 模式 ────────────────────────────────
+    if analysis_mode == "📈 連續型 vs 連續型（相關性檢定）":
+        _render_continuous_correlation(work_df_top, numeric_cols_top)
+        return
+
+    # ══════════════════════════════════════════════════════════
+    # ── 以下：原分類 vs 連續 組間比較模式 ────────────────────
+    # ══════════════════════════════════════════════════════════
 
     # ── 資料來源說明 ─────────────────────────────────────────
     st.markdown("""
@@ -401,12 +784,8 @@ def render(selected_process_df):
     )
 
     # ── 讓使用者選擇資料來源 ─────────────────────────────────
-    numeric_cols = (
-        selected_process_df.select_dtypes(include=["number"]).columns.tolist()
-        if selected_process_df is not None else []
-    )
-    _cd = st.session_state.get("clean_df")
-    work_df = _cd if _cd is not None else selected_process_df
+    numeric_cols = numeric_cols_top
+    work_df      = work_df_top
 
     source_mode = st.radio(
         "資料來源",
