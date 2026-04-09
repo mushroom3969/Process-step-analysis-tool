@@ -17,25 +17,29 @@ from sklearn.preprocessing import StandardScaler
 
 def _partial_corr_matrix(df: "pd.DataFrame") -> tuple:
     """
-    計算偏相關矩陣。
-    回傳 (pcorr_df, warning_msg)：
-    - pcorr_df：偏相關 DataFrame（若無法計算則為 None）
-    - warning_msg：說明失敗原因的字串（成功則為 None）
+    用「迴歸殘差法」計算偏相關矩陣，不需要矩陣求逆，數值更穩定。
+
+    原理：partial_corr(Xi, Xj | 其他) = corr(ei, ej)
+      ei = Xi 對「所有其他變數」迴歸後的殘差
+      ej = Xj 對「所有其他變數」迴歸後的殘差
+
+    回傳 (pcorr_df, warning_msg)
     """
-    from numpy.linalg import inv as _inv, pinv as _pinv
+    from sklearn.linear_model import Ridge as _Ridge
 
     warns = []
 
-    # ── Step 1：移除常數欄（std=0）和含 NaN/Inf 的欄位 ─────
-    arr_raw = df.dropna().values.astype(float)
+    # ── Step 1：移除常數欄和含 NaN/Inf 的欄位 ───────────────
+    clean = df.dropna()
+    arr_raw = clean.values.astype(float)
     valid_mask = (
-        np.isfinite(arr_raw).all(axis=0) &          # 無 Inf
-        (np.std(arr_raw, axis=0) > 1e-10)           # 非常數
+        np.isfinite(arr_raw).all(axis=0) &
+        (np.std(arr_raw, axis=0) > 1e-10)
     )
     cols_valid = [c for c, v in zip(df.columns, valid_mask) if v]
-    removed = [c for c, v in zip(df.columns, valid_mask) if not v]
+    removed    = [c for c, v in zip(df.columns, valid_mask) if not v]
     if removed:
-        warns.append(f"已自動移除常數或含異常值的欄位：{removed}")
+        warns.append(f"已自動移除常數或含異常值的欄位：{', '.join(str(r) for r in removed)}")
 
     if len(cols_valid) < 2:
         return None, "有效欄位不足 2 個（其餘皆為常數或含異常值）。"
@@ -47,64 +51,36 @@ def _partial_corr_matrix(df: "pd.DataFrame") -> tuple:
     if n_samples < n_feats + 2:
         return None, (
             f"樣本數（{n_samples}）< 特徵數 + 2（{n_feats + 2}），"
-            f"無法計算偏相關。請將特徵數減少至 {max(2, n_samples - 3)} 個以下。"
+            f"請將特徵數減少至 {max(2, n_samples - 3)} 個以下。"
         )
 
-    # ── Step 3：計算相關矩陣，安全處理奇異性 ────────────────
-    corr = np.corrcoef(arr.T)
-    # 確保對稱且無 NaN
-    corr = (corr + corr.T) / 2
-    np.fill_diagonal(corr, 1.0)
+    # ── Step 3：迴歸殘差法 ───────────────────────────────────
+    # 對每個欄位，用其他所有欄位做 Ridge 迴歸，取殘差
+    # 用 Ridge 而非 OLS 是為了在共線性時仍能穩定求解
+    alpha_ridge = 1e-3   # 很小的正則化，幾乎不影響結果
+    residuals = np.zeros_like(arr)
+    for i in range(n_feats):
+        others = np.delete(arr, i, axis=1)
+        yi     = arr[:, i]
+        reg    = _Ridge(alpha=alpha_ridge, fit_intercept=True)
+        reg.fit(others, yi)
+        residuals[:, i] = yi - reg.predict(others)
 
-    if not np.isfinite(corr).all():
-        return None, "相關矩陣含有 NaN/Inf，請檢查資料品質。"
+    # ── Step 4：計算殘差之間的相關係數 = 偏相關 ─────────────
+    pcorr_arr = np.corrcoef(residuals.T)
+    # 確保值域在 [-1, 1] 且無 NaN（corrcoef 理論上應該是，但以防萬一）
+    pcorr_arr = np.clip(pcorr_arr, -1.0, 1.0)
+    np.fill_diagonal(pcorr_arr, 1.0)
 
-    # ── Step 4：嘗試求逆，失敗則逐步增大 ridge ───────────────
-    precision = None
-    used_ridge = 0.0
-    for ridge in [0.0, 1e-6, 1e-4, 1e-2, 0.1]:
-        try:
-            mat = corr + np.eye(n_feats) * ridge
-            p   = _inv(mat)
-            # 驗證：對角線必須全為正
-            if np.all(np.diag(p) > 0) and np.isfinite(p).all():
-                precision  = p
-                used_ridge = ridge
-                break
-        except np.linalg.LinAlgError:
-            continue
+    if not np.isfinite(pcorr_arr).all():
+        # fallback：把 NaN 填 0
+        pcorr_arr = np.nan_to_num(pcorr_arr, nan=0.0)
+        warns.append("部分偏相關無法計算，已填補為 0。")
 
-    if precision is None:
-        # 最後手段：pseudo-inverse
-        try:
-            precision = _pinv(corr)
-            used_ridge = None
-            warns.append("矩陣奇異，使用 pseudo-inverse 估計，偏相關結果僅供參考。")
-        except Exception:
-            return None, "矩陣求逆完全失敗，特徵之間可能存在完全共線性，請手動移除重複特徵。"
-
-    if used_ridge and used_ridge > 0:
-        warns.append(f"相關矩陣接近奇異，已加入 ridge 正則化（λ={used_ridge}）。")
-
-    # ── Step 5：計算偏相關 ───────────────────────────────────
-    n = n_feats
-    pcorr = np.zeros((n, n))
-    for i in range(n):
-        for j in range(n):
-            if i == j:
-                pcorr[i, j] = 1.0
-            else:
-                denom = precision[i, i] * precision[j, j]
-                if denom <= 0 or not np.isfinite(denom):
-                    pcorr[i, j] = np.nan
-                else:
-                    pcorr[i, j] = float(np.clip(
-                        -precision[i, j] / np.sqrt(denom), -1.0, 1.0
-                    ))
-
-    result_df = pd.DataFrame(pcorr, index=cols_valid, columns=cols_valid)
+    result_df = pd.DataFrame(pcorr_arr, index=cols_valid, columns=cols_valid)
     warn_msg  = "　".join(warns) if warns else None
     return result_df, warn_msg
+
 
 
 def _pc_skeleton(corr_mat: "np.ndarray", n_samples: int,
@@ -422,20 +398,56 @@ def _render_causal_tab(X_fi: "pd.DataFrame", y_fi: "pd.Series", top_n_fi: int):
                 # Y 的偏相關排名
                 if target_col in pcorr.columns:
                     st.markdown(f"**{target_col} 的偏相關排名**（直接效應大小）")
-                    y_pcorr = pcorr[target_col].drop(target_col).sort_values(key=np.abs, ascending=False)
-                    y_corr  = corr[target_col].drop(target_col, errors="ignore").reindex(y_pcorr.index)
+
+                    # 取 Y 欄，並確保兩個 Series 的 index 完全對齊
+                    y_pcorr = pcorr[target_col].drop(target_col, errors="ignore")
+                    y_corr  = corr[target_col].drop(target_col, errors="ignore")
+
+                    # 取交集 index，確保可以相減
+                    shared_idx = y_pcorr.index.intersection(y_corr.index)
+                    y_pcorr = y_pcorr.reindex(shared_idx).astype(float)
+                    y_corr  = y_corr.reindex(shared_idx).astype(float)
+
+                    # 依偏相關絕對值排序
+                    order   = y_pcorr.abs().sort_values(ascending=False).index
+                    y_pcorr = y_pcorr.reindex(order)
+                    y_corr  = y_corr.reindex(order)
+                    diff    = (y_pcorr - y_corr).round(4)
+
                     rank_df = pd.DataFrame({
-                        "Feature":         y_pcorr.index,
-                        "偏相關":          y_pcorr.values.round(4),
-                        "普通相關":        y_corr.values.round(4),
-                        "差值（直接-總）":  (y_pcorr - y_corr).values.round(4),
+                        "Feature":         list(order),
+                        "偏相關":          y_pcorr.round(4).tolist(),
+                        "普通相關":        y_corr.round(4).tolist(),
+                        "差值（偏-普）":   diff.tolist(),
                     })
-                    rank_df["解讀"] = rank_df.apply(
-                        lambda r: "🎯 直接效應為主" if abs(r["偏相關"]) >= abs(r["普通相關"]) * 0.8
-                        else "⚠️ 可能受混淆因子影響", axis=1
-                    )
+
+                    def _explain(row):
+                        pc, cc = row["偏相關"], row["普通相關"]
+                        if pd.isna(pc) or pd.isna(cc):
+                            return "—"
+                        if abs(pc) >= abs(cc) * 0.8:
+                            return "🎯 直接效應為主"
+                        if abs(pc) < 0.05:
+                            return "⬜ 直接效應微弱"
+                        return "⚠️ 可能受混淆因子影響"
+
+                    rank_df["解讀"] = rank_df.apply(_explain, axis=1)
+
+                    # 顯示前確保數值欄都是 float，避免 None/NaN 顯示問題
+                    for col in ["偏相關", "普通相關", "差值（偏-普）"]:
+                        rank_df[col] = pd.to_numeric(rank_df[col], errors="coerce")
+
                     st.dataframe(
-                        rank_df.style.background_gradient(cmap="RdBu_r", subset=["偏相關", "普通相關"]),
+                        rank_df.style
+                            .background_gradient(cmap="RdBu_r", subset=["偏相關", "普通相關"],
+                                                  vmin=-1, vmax=1)
+                            .background_gradient(cmap="PiYG", subset=["差值（偏-普）"],
+                                                  vmin=-0.5, vmax=0.5)
+                            .format({
+                                "偏相關":      lambda x: f"{x:.4f}" if pd.notna(x) else "—",
+                                "普通相關":    lambda x: f"{x:.4f}" if pd.notna(x) else "—",
+                                "差值（偏-普）": lambda x: f"{x:+.4f}" if pd.notna(x) else "—",
+                            }),
                         use_container_width=True, hide_index=True
                     )
 
