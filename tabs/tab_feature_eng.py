@@ -166,20 +166,34 @@ def _render_changed_cols(df_before, df_after, cols_removed, cols_added,
 
     if cols_removed:
         st.markdown("##### 🗑️ 被刪除的欄位")
+        # 效能優化：欄位多時只顯示列表和反悔按鈕，不自動繪圖
+        # 點擊欄位名稱後才繪圖，避免同時建立大量 matplotlib figure
+        CHART_LIMIT = 5   # 超過此數量就不自動繪圖
+        auto_chart = len(cols_removed) <= CHART_LIMIT
+
+        if not auto_chart:
+            st.caption(f"共 {len(cols_removed)} 個欄位被刪除，展開各欄可查看趨勢圖。")
+
         for i, col in enumerate(cols_removed):
             with st.expander(f"🗑️  **{col[:70]}**", expanded=False):
                 c_left, c_right = st.columns([5, 1])
                 with c_left:
                     if col in source_df_for_removed.columns:
-                        try:
-                            fig = _mini_trend(source_df_for_removed, col,
-                                              color="#e84855",
-                                              title_prefix="[刪除前] ",
-                                              show_mean=show_mean)
-                            st.pyplot(fig, use_container_width=True)
-                            plt.close()
-                        except Exception as e:
-                            st.caption(f"無法繪圖：{e}")
+                        # 超過限制時加一個按鈕才繪圖，避免大量 figure 同時建立
+                        draw_key = f"draw_rm_{_sh}_{i}"
+                        should_draw = auto_chart or st.button(
+                            "📈 顯示趨勢圖", key=draw_key, type="secondary"
+                        )
+                        if should_draw:
+                            try:
+                                fig = _mini_trend(source_df_for_removed, col,
+                                                  color="#e84855",
+                                                  title_prefix="[刪除前] ",
+                                                  show_mean=show_mean)
+                                st.pyplot(fig, use_container_width=True)
+                                plt.close()
+                            except Exception as e:
+                                st.caption(f"無法繪圖：{e}")
                     else:
                         st.caption("（欄位已不存在，無法繪圖）")
                 with c_right:
@@ -469,14 +483,17 @@ def _render_main(selected_process_df, show_mean: bool = True):
                         stat_cols[5].metric("Max",     f"{s.max():.4f}" if len(s) else "—")
 
                         color = "#2ca02c" if col in all_added else "#2e86ab"
-                        try:
-                            # 確保 show_mean 在之前的代碼中有定義，若無則預設為 True
-                            show_mean_val = st.session_state.get("show_mean", True)
-                            fig = _mini_trend(clean_df, col, color=color, show_mean=show_mean_val)
-                            st.pyplot(fig, use_container_width=True)
-                            plt.close(fig)
-                        except Exception as e:
-                            st.caption(f"繪圖失敗：{e}")
+                        # Step 3 欄位多，用按鈕觸發繪圖避免全部同時渲染
+                        if st.button("📈 顯示趨勢圖", key=f"fi_ov_chart_{_ch}",
+                                     type="secondary"):
+                            try:
+                                show_mean_val = st.session_state.get("fe_show_mean", True)
+                                fig = _mini_trend(clean_df, col, color=color,
+                                                  show_mean=show_mean_val)
+                                st.pyplot(fig, use_container_width=True)
+                                plt.close(fig)
+                            except Exception as e:
+                                st.caption(f"繪圖失敗：{e}")
 
                     with exp_r:
                         st.markdown("<br><br>", unsafe_allow_html=True)
