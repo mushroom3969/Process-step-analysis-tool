@@ -368,6 +368,9 @@ def _render_causal_tab(X_fi: "pd.DataFrame", y_fi: "pd.Series", top_n_fi: int):
 
                 # 只顯示有共同欄位的部分
                 common_cols = [c for c in pcorr.columns if c in sub_df.columns]
+                if not common_cols:
+                    st.error("偏相關矩陣與原始欄位沒有交集，可能所有欄位都被自動移除（常數或含異常值）。請減少選擇的特徵數或檢查資料品質。")
+                    st.stop()
                 pcorr = pcorr.loc[common_cols, common_cols]
                 corr  = corr.loc[common_cols, common_cols]
 
@@ -385,7 +388,7 @@ def _render_causal_tab(X_fi: "pd.DataFrame", y_fi: "pd.Series", top_n_fi: int):
                 n_feat = len(common_cols)
                 fig_sz = max(8, n_feat * 0.55)
                 fig, ax = plt.subplots(figsize=(fig_sz + 1, fig_sz))
-                annot_fs = max(6, min(9, int(80 / n_feat)))
+                annot_fs = max(6, min(9, int(80 / max(n_feat, 1))))
                 sns.heatmap(show_mat, annot=True, fmt=".2f", cmap="RdBu_r",
                             center=0, vmin=-1, vmax=1, ax=ax,
                             annot_kws={"size": annot_fs}, linewidths=0.3,
