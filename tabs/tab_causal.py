@@ -287,7 +287,23 @@ def _draw_graph(ax, nodes: list, edges: list, pos: dict,
         circle = plt.Circle((px, py), r, color=node_colors[i],
                              zorder=2, alpha=0.88)
         ax.add_patch(circle)
-        ax.text(px, py, str(node)[:],
+
+        # 1. 處理字串邏輯
+        node_str = str(node)
+        if ":" in node_str:
+            # 根據冒號分割
+            parts = node_str.split(":")
+            prefix_full = parts[0].strip()   # 冒號前面的部分
+            suffix = parts[1].strip()        # 冒號後面的部分
+            
+            # 取得前面的「最後一個單字」
+            last_word = prefix_full.split()[-1] if prefix_full.split() else ""
+            display_text = f"{last_word}\n{suffix}" # 這裡用了換行符號 \n，讓顯示更清楚
+        else:
+            display_text = node_str
+        
+        # 2. 繪製文字
+        ax.text(px, py, display_text,
                 ha="center", va="center", fontsize=label_fontsize,
                 color="black", fontweight="bold", zorder=3,
                 wrap=True)
