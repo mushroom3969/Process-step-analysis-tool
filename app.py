@@ -27,6 +27,7 @@ from tabs import tab_pca               # render(selected_process_df)
 from tabs import tab_stat_test         # render(selected_process_df)
 from tabs import tab_trend             # render(selected_process_df)
 from tabs import tab_literature        # render()
+from tabs import tab_causal            # render(selected_process_df)
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -131,31 +132,23 @@ with st.sidebar:
     uploaded_file = st.file_uploader("上傳 CSV 資料檔", type=["csv"])
     
     if uploaded_file:
-        # 用檔案 id 判斷是否為「新上傳」，避免每次 rerun 都誤清 clean_df
-        file_id = uploaded_file.file_id
-        if st.session_state.get("_last_file_id") != file_id:
-            st.session_state["_last_file_id"] = file_id
-            try:
-                raw_df = pd.read_csv(uploaded_file)
-                batch_candidates = [c for c in raw_df.columns if "BatchID" in c]
-                if batch_candidates:
-                    raw_df = raw_df.rename(columns={batch_candidates[0]: "BatchID"})
-                
-                non_batch = raw_df.columns.difference(["BatchID"])
-                raw_df[non_batch] = raw_df[non_batch].apply(pd.to_numeric, errors="coerce")
-                
-                st.session_state["raw_df"] = raw_df
-                st.session_state["dfs_dict"] = split_process_df(raw_df)
-                st.session_state["selected_steps"] = []
-                st.session_state["selected_process_df"] = None
-                st.session_state["clean_df"] = None
-                st.session_state["fe_auto_result"]      = None
-                st.session_state["fe_stat_result"]      = None
-                st.session_state["fe_minmax_ba_result"] = None
-                st.session_state["df_before_step2"]     = None
-                st.success(f"載入成功！{raw_df.shape[0]} 筆 × {raw_df.shape[1]} 欄")
-            except Exception as e:
-                st.error(f"載入失敗：{e}")
+        try:
+            raw_df = pd.read_csv(uploaded_file)
+            batch_candidates = [c for c in raw_df.columns if "BatchID" in c]
+            if batch_candidates:
+                raw_df = raw_df.rename(columns={batch_candidates[0]: "BatchID"})
+            
+            non_batch = raw_df.columns.difference(["BatchID"])
+            raw_df[non_batch] = raw_df[non_batch].apply(pd.to_numeric, errors="coerce")
+            
+            st.session_state["raw_df"] = raw_df
+            st.session_state["dfs_dict"] = split_process_df(raw_df)
+            st.session_state["selected_steps"] = []
+            st.session_state["selected_process_df"] = None
+            st.session_state["clean_df"] = None
+            st.success(f"載入成功！{raw_df.shape[0]} 筆 × {raw_df.shape[1]} 欄")
+        except Exception as e:
+            st.error(f"載入失敗：{e}")
 
     # ── 製程步驟選擇 ──────────────────────────────────────────
     st.markdown("---")
@@ -255,6 +248,7 @@ tabs = st.tabs([
     " 特徵重要性",
     " 統計檢定",
     " 文獻佐證分析",
+    " 因果推論",
 ])
 
 with tabs[0]:
@@ -286,3 +280,6 @@ with tabs[8]:
 
 with tabs[9]:
     tab_literature.render()
+
+with tabs[10]:
+    tab_causal.render(active_df)
