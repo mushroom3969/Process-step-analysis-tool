@@ -287,7 +287,7 @@ def _draw_graph(ax, nodes: list, edges: list, pos: dict,
         circle = plt.Circle((px, py), r, color=node_colors[i],
                              zorder=2, alpha=0.88)
         ax.add_patch(circle)
-        ax.text(px, py, str(node)[:30],
+        ax.text(px, py, str(node)[:],
                 ha="center", va="center", fontsize=label_fontsize,
                 color="black", fontweight="bold", zorder=3,
                 wrap=True)
