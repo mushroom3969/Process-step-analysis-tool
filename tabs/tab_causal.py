@@ -15,19 +15,49 @@ from sklearn.linear_model import LinearRegression
 from sklearn.preprocessing import StandardScaler
 
 
-def _partial_corr_matrix(df: "pd.DataFrame") -> "pd.DataFrame":
-    """計算所有欄位兩兩之間的偏相關係數（控制其餘所有欄位）"""
-    from numpy.linalg import inv as _inv
+def _partial_corr_matrix(df: "pd.DataFrame") -> tuple:
+    """
+    計算偏相關矩陣。
+    回傳 (pcorr_df, warning_msg)：
+    - pcorr_df：偏相關 DataFrame（若無法計算則為 None）
+    - warning_msg：說明失敗原因的字串（成功則為 None）
+    """
+    from numpy.linalg import inv as _inv, matrix_rank
+
     cols = df.columns.tolist()
     arr  = df.dropna().values.astype(float)
-    if arr.shape[0] < arr.shape[1] + 2:
-        # 樣本不足時退化為普通相關
-        return df.corr()
+    n_samples, n_feats = arr.shape
+
+    # ── 樣本數檢查 ──────────────────────────────────────────
+    if n_samples < n_feats + 2:
+        return None, (
+            f"樣本數（{n_samples}）< 特徵數 + 2（{n_feats + 2}），"
+            f"無法計算偏相關。請**減少選擇的特徵數**至 {n_samples - 3} 個以下。"
+        )
+
     corr = np.corrcoef(arr.T)
-    try:
-        precision = _inv(corr)
-    except np.linalg.LinAlgError:
-        return df.corr()
+
+    # ── 秩檢查（共線性） ─────────────────────────────────────
+    rank = matrix_rank(corr)
+    if rank < n_feats:
+        # 嘗試用 pseudo-inverse 或 ridge regularization
+        ridge = 1e-4
+        corr_reg = corr + np.eye(n_feats) * ridge
+        try:
+            precision = _inv(corr_reg)
+        except np.linalg.LinAlgError:
+            return None, (
+                f"相關矩陣奇異（rank={rank}/{n_feats}），特徵之間存在嚴重共線性。"
+                f"請移除高度相關的特徵後再試。"
+            )
+        warn = (f"⚠️ 相關矩陣秩不足（rank={rank}/{n_feats}），已加入 ridge 正則化（λ={ridge}）估計偏相關，結果僅供參考。")
+    else:
+        try:
+            precision = _inv(corr)
+        except np.linalg.LinAlgError:
+            return None, "矩陣求逆失敗，請減少特徵數量。"
+        warn = None
+
     n = len(cols)
     pcorr = np.zeros((n, n))
     for i in range(n):
@@ -35,8 +65,16 @@ def _partial_corr_matrix(df: "pd.DataFrame") -> "pd.DataFrame":
             if i == j:
                 pcorr[i, j] = 1.0
             else:
-                pcorr[i, j] = -precision[i, j] / np.sqrt(precision[i, i] * precision[j, j])
-    return pd.DataFrame(pcorr, index=cols, columns=cols)
+                denom = np.sqrt(precision[i, i] * precision[j, j])
+                if denom <= 0 or np.isnan(denom):
+                    # 個別 pair 退化，標為 NaN
+                    pcorr[i, j] = np.nan
+                else:
+                    val = -precision[i, j] / denom
+                    # 夾在 [-1, 1]
+                    pcorr[i, j] = float(np.clip(val, -1.0, 1.0))
+
+    return pd.DataFrame(pcorr, index=cols, columns=cols), warn
 
 
 def _pc_skeleton(corr_mat: "np.ndarray", n_samples: int,
@@ -143,9 +181,113 @@ def _regression_ate(X: "pd.DataFrame", treatment: str,
     return t_vals, np.array(ate_vals), np.array(conf_low), np.array(conf_high), coef_T, se
 
 
+
+def _spring_layout(nodes: list, edges: list, seed: int = 42,
+                   iterations: int = 80, k: float = None) -> dict:
+    """
+    簡易 Fruchterman-Reingold spring layout，不依賴 networkx。
+    回傳 {node: (x, y)} dict。
+    """
+    rng = np.random.default_rng(seed)
+    n = len(nodes)
+    if n == 0:
+        return {}
+    if n == 1:
+        return {nodes[0]: (0.5, 0.5)}
+
+    # 初始位置：圓形均勻分布
+    pos = {}
+    for i, node in enumerate(nodes):
+        angle = 2 * np.pi * i / n
+        pos[node] = np.array([0.5 + 0.4 * np.cos(angle),
+                               0.5 + 0.4 * np.sin(angle)], dtype=float)
+
+    if k is None:
+        k = 1.0 / np.sqrt(n)
+
+    node_idx = {node: i for i, node in enumerate(nodes)}
+    adj = set((node_idx[u], node_idx[v]) for u, v in edges)
+    adj |= set((node_idx[v], node_idx[u]) for u, v in edges)  # 無向
+
+    for _ in range(iterations):
+        disp = {node: np.zeros(2) for node in nodes}
+        # 斥力
+        for i, ni in enumerate(nodes):
+            for j, nj in enumerate(nodes):
+                if i >= j:
+                    continue
+                delta = pos[ni] - pos[nj]
+                dist  = max(np.linalg.norm(delta), 1e-6)
+                force = k**2 / dist
+                disp[ni] +=  force * delta / dist
+                disp[nj] -=  force * delta / dist
+        # 引力（有邊的節點）
+        for i, j in adj:
+            if i >= j:
+                continue
+            ni, nj = nodes[i], nodes[j]
+            delta = pos[ni] - pos[nj]
+            dist  = max(np.linalg.norm(delta), 1e-6)
+            force = dist**2 / k
+            disp[ni] -= force * delta / dist
+            disp[nj] += force * delta / dist
+        # 更新位置
+        temp = 0.1 * (1 - _ / iterations)
+        for node in nodes:
+            d = disp[node]
+            dn = max(np.linalg.norm(d), 1e-6)
+            pos[node] += min(dn, temp) * d / dn
+            # 限制在 [0.05, 0.95]
+            pos[node] = np.clip(pos[node], 0.05, 0.95)
+
+    return {node: tuple(pos[node].tolist()) for node in nodes}
+
+
+def _draw_graph(ax, nodes: list, edges: list, pos: dict,
+                node_colors: list, node_sizes: list,
+                directed: bool = False,
+                edge_weights: list = None,
+                label_fontsize: int = 7):
+    """用 matplotlib patches 畫圖，不依賴 networkx。"""
+    import matplotlib.patches as mpatches
+    from matplotlib.patches import FancyArrowPatch
+
+    ax.set_xlim(0, 1); ax.set_ylim(0, 1); ax.axis("off")
+
+    # 邊
+    for idx, (u, v) in enumerate(edges):
+        pu = np.array(pos[u]); pv = np.array(pos[v])
+        lw = float(edge_weights[idx]) * 3 if edge_weights else 1.5
+        lw = max(0.5, min(lw, 5.0))
+
+        if directed:
+            # 箭頭（縮短起點終點避免被節點遮住）
+            delta = pv - pu
+            dist  = max(np.linalg.norm(delta), 1e-6)
+            r_node = 0.025
+            pu_adj = pu + delta / dist * r_node
+            pv_adj = pv - delta / dist * r_node
+            ax.annotate("", xy=pv_adj, xytext=pu_adj,
+                        arrowprops=dict(arrowstyle="-|>", color="#555555",
+                                        lw=lw, mutation_scale=15))
+        else:
+            ax.plot([pu[0], pv[0]], [pu[1], pv[1]],
+                    color="#888888", lw=lw, alpha=0.7, zorder=1)
+
+    # 節點
+    for i, node in enumerate(nodes):
+        px, py = pos[node]
+        r = np.sqrt(node_sizes[i]) / 1800
+        circle = plt.Circle((px, py), r, color=node_colors[i],
+                             zorder=2, alpha=0.88)
+        ax.add_patch(circle)
+        ax.text(px, py, str(node)[:20],
+                ha="center", va="center", fontsize=label_fontsize,
+                color="white", fontweight="bold", zorder=3,
+                wrap=True)
+
 def _render_causal_tab(X_fi: "pd.DataFrame", y_fi: "pd.Series", top_n_fi: int):
     """因果推論分析 Tab"""
-    import networkx as nx
 
     st.markdown("#### 🔗 因果推論分析")
     st.caption(
@@ -201,11 +343,18 @@ def _render_causal_tab(X_fi: "pd.DataFrame", y_fi: "pd.Series", top_n_fi: int):
 
             if st.button("🧮 計算偏相關", key="run_partial_corr"):
                 with st.spinner("計算中..."):
-                    pcorr = _partial_corr_matrix(sub_df)
-                    corr  = sub_df.corr()
+                    pcorr, warn_msg = _partial_corr_matrix(sub_df)
+                    corr = sub_df.corr()
+                if pcorr is None:
+                    st.error(f"❌ 無法計算偏相關：{warn_msg}")
+                    st.info(f"目前樣本數：{len(sub_df)}　特徵數：{len(sub_df.columns)}　"
+                            f"需要：樣本數 > 特徵數 + 2 = {len(sub_df.columns) + 2}")
+                else:
+                    if warn_msg:
+                        st.warning(warn_msg)
                     st.session_state["causal_pcorr"] = pcorr
                     st.session_state["causal_corr"]  = corr
-                st.success("✅ 完成！")
+                    st.success(f"✅ 完成！樣本數={len(sub_df)}，特徵數={len(sub_df.columns)}")
 
             if st.session_state.get("causal_pcorr") is not None:
                 pcorr = st.session_state["causal_pcorr"]
@@ -297,35 +446,35 @@ def _render_causal_tab(X_fi: "pd.DataFrame", y_fi: "pd.Series", top_n_fi: int):
             feat_names = st.session_state["causal_pc_feats"]
             n_nodes    = len(feat_names)
 
-            # 用 networkx 畫圖
-            G = nx.Graph()
-            G.add_nodes_from(feat_names)
-            for i in range(n_nodes):
-                for j in range(i + 1, n_nodes):
-                    if adj[i, j] > 0:
-                        G.add_edge(feat_names[i], feat_names[j])
+            # 建立邊列表
+            edges_pc = [(feat_names[i], feat_names[j])
+                        for i in range(n_nodes) for j in range(i+1, n_nodes)
+                        if adj[i, j] > 0]
+            node_colors_pc = ["#e84855" if n == target_col else "#2e86ab"
+                               for n in feat_names]
+            node_sizes_pc  = [1200 if n == target_col else 800
+                               for n in feat_names]
+            pos_pc = _spring_layout(feat_names, edges_pc, seed=42,
+                                    k=2.5 / max(np.sqrt(n_nodes), 1))
 
             fig, ax = plt.subplots(figsize=(12, 8))
-            pos = nx.spring_layout(G, seed=42, k=2.5 / np.sqrt(n_nodes))
-            node_colors = ["#e84855" if n == target_col else "#2e86ab" for n in G.nodes()]
-            node_sizes  = [1200 if n == target_col else 800 for n in G.nodes()]
-            nx.draw_networkx_nodes(G, pos, node_color=node_colors, node_size=node_sizes,
-                                   alpha=0.85, ax=ax)
-            nx.draw_networkx_labels(G, pos, font_size=7, font_color="white",
-                                    font_weight="bold", ax=ax)
-            nx.draw_networkx_edges(G, pos, edge_color="#888888", width=1.5,
-                                   alpha=0.7, ax=ax)
+            _draw_graph(ax, feat_names, edges_pc, pos_pc,
+                        node_colors_pc, node_sizes_pc, directed=False)
             ax.set_title(f"PC 因果骨架（α={alpha_pc}，紅色=目標變數）", fontsize=13)
-            ax.axis("off")
             plt.tight_layout(); st.pyplot(fig); plt.close()
 
             # 連接度排名
+            degree_map = {n: 0 for n in feat_names}
+            for u, v in edges_pc:
+                degree_map[u] += 1
+                degree_map[v] += 1
+            y_neighbors = {v for u, v in edges_pc if u == target_col} |                           {u for u, v in edges_pc if v == target_col}
             degree_df = pd.DataFrame({
-                "Feature": list(G.nodes()),
-                "連接數（Degree）": [G.degree(n) for n in G.nodes()],
+                "Feature": feat_names,
+                "連接數（Degree）": [degree_map[n] for n in feat_names],
             }).sort_values("連接數（Degree）", ascending=False).reset_index(drop=True)
             degree_df["是否連接Y"] = degree_df["Feature"].apply(
-                lambda f: "✅" if G.has_edge(f, target_col) or f == target_col else "—"
+                lambda f: "✅" if f in y_neighbors or f == target_col else "—"
             )
             st.dataframe(degree_df, use_container_width=True, hide_index=True)
             st.caption(
@@ -391,23 +540,23 @@ def _render_causal_tab(X_fi: "pd.DataFrame", y_fi: "pd.Series", top_n_fi: int):
             lg_df = lg_df.sort_values("方向信心", ascending=False).reset_index(drop=True)
 
             # 畫有向圖
-            G_lg = nx.DiGraph()
-            for _, row in lg_df.iterrows():
-                G_lg.add_edge(row["因（Cause）"], row["果（Effect）"],
-                              weight=row["方向信心"])
+            # 建立有向圖資料結構
+            nodes_lg = list(dict.fromkeys(
+                [r["因（Cause）"] for _, r in lg_df.iterrows()] +
+                [r["果（Effect）"] for _, r in lg_df.iterrows()]
+            ))
+            edges_lg  = [(r["因（Cause）"], r["果（Effect）"]) for _, r in lg_df.iterrows()]
+            weights_lg = lg_df["方向信心"].tolist()
+            node_c_lg = ["#e84855" if n == target_col else "#2e86ab" for n in nodes_lg]
+            node_s_lg = [1200 if n == target_col else 800 for n in nodes_lg]
+            pos_lg = _spring_layout(nodes_lg, edges_lg, seed=42,
+                                    k=2.5 / max(np.sqrt(len(nodes_lg)), 1))
 
             fig, ax = plt.subplots(figsize=(12, 8))
-            pos = nx.spring_layout(G_lg, seed=42, k=2.5 / max(np.sqrt(G_lg.number_of_nodes()), 1))
-            node_c = ["#e84855" if n == target_col else "#2e86ab" for n in G_lg.nodes()]
-            node_s = [1200 if n == target_col else 800 for n in G_lg.nodes()]
-            edge_w = [G_lg[u][v]["weight"] * 3 for u, v in G_lg.edges()]
-            nx.draw_networkx_nodes(G_lg, pos, node_color=node_c, node_size=node_s, alpha=0.85, ax=ax)
-            nx.draw_networkx_labels(G_lg, pos, font_size=7, font_color="white", font_weight="bold", ax=ax)
-            nx.draw_networkx_edges(G_lg, pos, width=edge_w, edge_color="#555555",
-                                   arrows=True, arrowsize=20,
-                                   connectionstyle="arc3,rad=0.1", ax=ax)
+            _draw_graph(ax, nodes_lg, edges_lg, pos_lg,
+                        node_c_lg, node_s_lg,
+                        directed=True, edge_weights=weights_lg)
             ax.set_title("LiNGAM 因果有向圖（紅色=目標變數，箭頭粗細=方向信心）", fontsize=12)
-            ax.axis("off")
             plt.tight_layout(); st.pyplot(fig); plt.close()
 
             # 找目標 Y 的直接原因
