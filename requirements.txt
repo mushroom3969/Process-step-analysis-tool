@@ -8,3 +8,4 @@ scikit-learn>=1.4.0
 statsmodels>=0.14.0
 pca>=2.10.0
 shap>=0.45.0
+networkx>=3.4.2
