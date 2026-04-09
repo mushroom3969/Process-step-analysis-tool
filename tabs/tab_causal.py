@@ -289,7 +289,7 @@ def _draw_graph(ax, nodes: list, edges: list, pos: dict,
         ax.add_patch(circle)
         ax.text(px, py, str(node)[:20],
                 ha="center", va="center", fontsize=label_fontsize,
-                color="black", fontweight="bold", zorder=3,
+                color="white", fontweight="bold", zorder=3,
                 wrap=True)
 
 def _render_causal_tab(X_fi: "pd.DataFrame", y_fi: "pd.Series", top_n_fi: int):
@@ -670,9 +670,9 @@ def _render_causal_tab(X_fi: "pd.DataFrame", y_fi: "pd.Series", top_n_fi: int):
                         "ate_result":    (t_grid, ate_grid, ci_low, ci_high),
                         "ate_coef_t":    coef_t,
                         "ate_se_t":      se_t,
-                        "ate_treatment": treatment_col,
-                        "ate_from":      t_from,
-                        "ate_to":        t_to,
+                        "ate_treatment_val": treatment_col,
+                        "ate_from_val":      t_from,
+                        "ate_to_val":        t_to,
                     })
             st.success("✅ ATE 估計完成！")
 
@@ -680,9 +680,9 @@ def _render_causal_tab(X_fi: "pd.DataFrame", y_fi: "pd.Series", top_n_fi: int):
             t_grid, ate_grid, ci_low, ci_high = st.session_state["ate_result"]
             coef_t   = st.session_state["ate_coef_t"]
             se_t     = st.session_state["ate_se_t"]
-            treat_nm = st.session_state.get("ate_treatment", treatment_col)
-            t_f      = st.session_state.get("ate_from", t_from)
-            t_t      = st.session_state.get("ate_to", t_to)
+            treat_nm = st.session_state.get("ate_treatment_val", treatment_col)
+            t_f      = st.session_state.get("ate_from_val", t_from)
+            t_t      = st.session_state.get("ate_to_val", t_to)
 
             ate_point = float(coef_t * (t_t - t_f))
             ate_ci    = 1.96 * se_t * abs(t_t - t_f)
