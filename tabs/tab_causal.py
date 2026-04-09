@@ -289,7 +289,7 @@ def _draw_graph(ax, nodes: list, edges: list, pos: dict,
         ax.add_patch(circle)
         ax.text(px, py, str(node)[:20],
                 ha="center", va="center", fontsize=label_fontsize,
-                color="white", fontweight="bold", zorder=3,
+                color="black", fontweight="bold", zorder=3,
                 wrap=True)
 
 def _render_causal_tab(X_fi: "pd.DataFrame", y_fi: "pd.Series", top_n_fi: int):
