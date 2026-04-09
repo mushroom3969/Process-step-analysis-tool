@@ -59,9 +59,25 @@ def clean_process_features_with_log(
         return None
 
     def _base(col: str, kw: str) -> str:
+        """移除關鍵字，回傳正規化後的 base 字串供配對用"""
         n = col.lower()
         pattern = r"(?<![a-z0-9])" + re.escape(kw) + r"(?![a-z0-9])"
-        return re.sub(pattern, "", n).strip("_- ")
+        base = re.sub(pattern, "", n)
+        # 清理：多個連續底線/空格壓縮為單一，再去除首尾
+        base = re.sub(r"_+", "_", base)
+        base = re.sub(r" +", " ", base)
+        base = base.strip("_- ")
+        return base
+
+    def _make_label(col: str, kw: str) -> str:
+        """從原始欄位名稱（保留大小寫）去除關鍵字，作為新欄位名稱的前綴"""
+        # 先用不分大小寫的方式移除關鍵字
+        pattern = r"(?<![a-zA-Z0-9])" + re.escape(kw) + r"(?![a-zA-Z0-9])"
+        label = re.sub(pattern, "", col, flags=re.IGNORECASE)
+        label = re.sub(r"_+", "_", label)
+        label = re.sub(r" +", " ", label)
+        label = label.strip("_- ")
+        return label
 
     current_cols = list(new_df.columns)
     min_map, max_map, bef_map, aft_map = {}, {}, {}, {}
@@ -92,7 +108,11 @@ def clean_process_features_with_log(
     # Min/Max → mean + range
     for b in sorted(set(min_map) & set(max_map)):
         c_min, c_max = min_map[b], max_map[b]
-        label = b.strip("_- ") or f"{c_min}_{c_max}"
+        # 用 _make_label 保留原始大小寫；以 min 那欄為基準
+        kw_min = _find_kw(c_min, MIN_ALIASES)
+        label  = _make_label(c_min, kw_min) if kw_min else b.strip("_- ")
+        if not label:
+            label = f"{c_min}_{c_max}"
         mean_col  = f"{label}_mean"
         range_col = f"{label}_range"
         new_df[mean_col]  = (new_df[c_min] + new_df[c_max]) / 2
@@ -104,7 +124,10 @@ def clean_process_features_with_log(
     # Before/After、Start/End → diff (after/end − before/start)
     for b in sorted(set(bef_map) & set(aft_map)):
         c_bef, c_aft = bef_map[b], aft_map[b]
-        label = b.strip("_- ") or f"{c_bef}_{c_aft}"
+        kw_bef = _find_kw(c_bef, BEF_ALIASES)
+        label  = _make_label(c_bef, kw_bef) if kw_bef else b.strip("_- ")
+        if not label:
+            label = f"{c_bef}_{c_aft}"
         diff_col = f"{label}_diff"
         new_df[diff_col] = new_df[c_aft] - new_df[c_bef]
         drop_log.append({"Column": c_bef, "Reason": f"Merged into {diff_col}"})
