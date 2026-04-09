@@ -22,59 +22,89 @@ def _partial_corr_matrix(df: "pd.DataFrame") -> tuple:
     - pcorr_df：偏相關 DataFrame（若無法計算則為 None）
     - warning_msg：說明失敗原因的字串（成功則為 None）
     """
-    from numpy.linalg import inv as _inv, matrix_rank
+    from numpy.linalg import inv as _inv, pinv as _pinv
 
-    cols = df.columns.tolist()
-    arr  = df.dropna().values.astype(float)
+    warns = []
+
+    # ── Step 1：移除常數欄（std=0）和含 NaN/Inf 的欄位 ─────
+    arr_raw = df.dropna().values.astype(float)
+    valid_mask = (
+        np.isfinite(arr_raw).all(axis=0) &          # 無 Inf
+        (np.std(arr_raw, axis=0) > 1e-10)           # 非常數
+    )
+    cols_valid = [c for c, v in zip(df.columns, valid_mask) if v]
+    removed = [c for c, v in zip(df.columns, valid_mask) if not v]
+    if removed:
+        warns.append(f"已自動移除常數或含異常值的欄位：{removed}")
+
+    if len(cols_valid) < 2:
+        return None, "有效欄位不足 2 個（其餘皆為常數或含異常值）。"
+
+    arr = arr_raw[:, valid_mask]
     n_samples, n_feats = arr.shape
 
-    # ── 樣本數檢查 ──────────────────────────────────────────
+    # ── Step 2：樣本數檢查 ───────────────────────────────────
     if n_samples < n_feats + 2:
         return None, (
             f"樣本數（{n_samples}）< 特徵數 + 2（{n_feats + 2}），"
-            f"無法計算偏相關。請**減少選擇的特徵數**至 {n_samples - 3} 個以下。"
+            f"無法計算偏相關。請將特徵數減少至 {max(2, n_samples - 3)} 個以下。"
         )
 
+    # ── Step 3：計算相關矩陣，安全處理奇異性 ────────────────
     corr = np.corrcoef(arr.T)
+    # 確保對稱且無 NaN
+    corr = (corr + corr.T) / 2
+    np.fill_diagonal(corr, 1.0)
 
-    # ── 秩檢查（共線性） ─────────────────────────────────────
-    rank = matrix_rank(corr)
-    if rank < n_feats:
-        # 嘗試用 pseudo-inverse 或 ridge regularization
-        ridge = 1e-4
-        corr_reg = corr + np.eye(n_feats) * ridge
-        try:
-            precision = _inv(corr_reg)
-        except np.linalg.LinAlgError:
-            return None, (
-                f"相關矩陣奇異（rank={rank}/{n_feats}），特徵之間存在嚴重共線性。"
-                f"請移除高度相關的特徵後再試。"
-            )
-        warn = (f"⚠️ 相關矩陣秩不足（rank={rank}/{n_feats}），已加入 ridge 正則化（λ={ridge}）估計偏相關，結果僅供參考。")
-    else:
-        try:
-            precision = _inv(corr)
-        except np.linalg.LinAlgError:
-            return None, "矩陣求逆失敗，請減少特徵數量。"
-        warn = None
+    if not np.isfinite(corr).all():
+        return None, "相關矩陣含有 NaN/Inf，請檢查資料品質。"
 
-    n = len(cols)
+    # ── Step 4：嘗試求逆，失敗則逐步增大 ridge ───────────────
+    precision = None
+    used_ridge = 0.0
+    for ridge in [0.0, 1e-6, 1e-4, 1e-2, 0.1]:
+        try:
+            mat = corr + np.eye(n_feats) * ridge
+            p   = _inv(mat)
+            # 驗證：對角線必須全為正
+            if np.all(np.diag(p) > 0) and np.isfinite(p).all():
+                precision  = p
+                used_ridge = ridge
+                break
+        except np.linalg.LinAlgError:
+            continue
+
+    if precision is None:
+        # 最後手段：pseudo-inverse
+        try:
+            precision = _pinv(corr)
+            used_ridge = None
+            warns.append("矩陣奇異，使用 pseudo-inverse 估計，偏相關結果僅供參考。")
+        except Exception:
+            return None, "矩陣求逆完全失敗，特徵之間可能存在完全共線性，請手動移除重複特徵。"
+
+    if used_ridge and used_ridge > 0:
+        warns.append(f"相關矩陣接近奇異，已加入 ridge 正則化（λ={used_ridge}）。")
+
+    # ── Step 5：計算偏相關 ───────────────────────────────────
+    n = n_feats
     pcorr = np.zeros((n, n))
     for i in range(n):
         for j in range(n):
             if i == j:
                 pcorr[i, j] = 1.0
             else:
-                denom = np.sqrt(precision[i, i] * precision[j, j])
-                if denom <= 0 or np.isnan(denom):
-                    # 個別 pair 退化，標為 NaN
+                denom = precision[i, i] * precision[j, j]
+                if denom <= 0 or not np.isfinite(denom):
                     pcorr[i, j] = np.nan
                 else:
-                    val = -precision[i, j] / denom
-                    # 夾在 [-1, 1]
-                    pcorr[i, j] = float(np.clip(val, -1.0, 1.0))
+                    pcorr[i, j] = float(np.clip(
+                        -precision[i, j] / np.sqrt(denom), -1.0, 1.0
+                    ))
 
-    return pd.DataFrame(pcorr, index=cols, columns=cols), warn
+    result_df = pd.DataFrame(pcorr, index=cols_valid, columns=cols_valid)
+    warn_msg  = "　".join(warns) if warns else None
+    return result_df, warn_msg
 
 
 def _pc_skeleton(corr_mat: "np.ndarray", n_samples: int,
