@@ -645,16 +645,30 @@ def _render_causal_tab(X_fi: "pd.DataFrame", y_fi: "pd.Series", top_n_fi: int):
             key="ate_covariates"
         )
 
-        b1, b2 = st.columns(2)
         t_vals_range = all_df[treatment_col].dropna()
-        t_from = b1.number_input(
-            "T 從（t₁）", value=float(t_vals_range.quantile(0.25)),
-            format="%.4f", key="ate_from"
+        t_p05  = float(t_vals_range.quantile(0.05))
+        t_p95  = float(t_vals_range.quantile(0.95))
+        t_p25  = float(t_vals_range.quantile(0.25))
+        t_p75  = float(t_vals_range.quantile(0.75))
+        t_step = max((t_p95 - t_p05) / 100, 1e-6)
+
+        st.caption(
+            f"📌 數據實際範圍：**{t_p05:.4f}**（5th pct）~ **{t_p95:.4f}**（95th pct）　"
+            f"建議 t₁、t₂ 設在此範圍內，避免外插。"
         )
-        t_to = b2.number_input(
-            "T 到（t₂）", value=float(t_vals_range.quantile(0.75)),
-            format="%.4f", key="ate_to"
+
+        b1, b2 = st.columns(2)
+        t_from = b1.slider(
+            "T 從（t₁）", min_value=t_p05, max_value=t_p95,
+            value=t_p25, step=t_step, format="%.4f", key="ate_from"
         )
+        t_to = b2.slider(
+            "T 到（t₂）", min_value=t_p05, max_value=t_p95,
+            value=t_p75, step=t_step, format="%.4f", key="ate_to"
+        )
+
+        if t_from >= t_to:
+            st.warning("⚠️ t₁ 必須小於 t₂，請重新調整。")
 
         if st.button("📐 估計 ATE", key="run_ate", type="primary"):
             with st.spinner("ATE 估計中..."):
