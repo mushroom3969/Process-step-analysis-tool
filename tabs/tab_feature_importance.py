@@ -28,6 +28,8 @@ from sklearn.metrics import (
     mean_absolute_error, median_absolute_error, max_error,
 )
 
+from ml_analysis import compute_kfold_cv, compute_loocv, compute_bootstrap_cv
+
 
 # ═══════════════════════════════════════════════════════════
 #  Helpers
@@ -57,6 +59,210 @@ def _fmt(v, d=4):
     except (TypeError, ValueError):
         return "—"
     return f"{float(v):.{d}f}"
+
+
+# ═══════════════════════════════════════════════════════════
+#  CV Comparison Section (K-Fold / LOOCV / Bootstrap)
+# ═══════════════════════════════════════════════════════════
+
+def _render_cv_comparison(model, X, y, key_prefix: str = "cv"):
+    """
+    UI block for comparing K-Fold CV / LOOCV / Bootstrap CV.
+    Renders inside a st.expander; call after the main eval section.
+
+    Parameters
+    ----------
+    model      : fitted OR unfitted sklearn estimator
+                 (cloned per fold internally — no side effects)
+    X, y       : full dataset features + target
+    key_prefix : unique Streamlit widget key prefix per model
+    """
+    st.markdown("---")
+    st.markdown("#### 🔁 Cross-Validation 方法比較")
+    st.caption(
+        "**K-Fold CV**：將資料分成 k 折，輪流以 k-1 折訓練、1 折測試。  \n"
+        "**LOOCV**：每次留一個樣本作測試（n 折），無偏但計算量大。  \n"
+        "**Bootstrap CV**：有放回重抽 n 個樣本訓練，Out-of-Bag 樣本測試；"
+        "輸出 OOB 分布與 .632 校正估計（減少樂觀偏誤）。"
+    )
+
+    col1, col2, col3 = st.columns(3)
+    kfold_k  = col1.slider("K-Fold 折數 (k)",  3, 20, 5,   key=f"{key_prefix}_k")
+    boot_n   = col2.slider("Bootstrap 迭代數", 50, 500, 200, key=f"{key_prefix}_bn")
+    run_loocv = col3.checkbox("執行 LOOCV（樣本多時較慢）", value=True,
+                               key=f"{key_prefix}_loocv")
+
+    if not st.button("▶ 執行 CV 比較", key=f"{key_prefix}_run"):
+        st.info("設定好參數後點擊「▶ 執行 CV 比較」。")
+        return
+
+    X_arr = np.asarray(X, dtype=float)
+    y_arr = np.asarray(y, dtype=float).ravel()
+
+    results = {}
+    with st.spinner("K-Fold CV 計算中..."):
+        results["K-Fold"] = compute_kfold_cv(
+            model, X_arr, y_arr, n_splits=kfold_k)
+    if run_loocv:
+        with st.spinner(f"LOOCV 計算中（{len(y_arr)} folds）..."):
+            results["LOOCV"] = compute_loocv(model, X_arr, y_arr)
+    with st.spinner(f"Bootstrap CV 計算中（{boot_n} iter）..."):
+        results["Bootstrap"] = compute_bootstrap_cv(
+            model, X_arr, y_arr, n_boot=boot_n)
+
+    # ── 1. 摘要比較表 ────────────────────────────────────────
+    st.markdown("##### 📋 CV 方法摘要比較")
+    summary_rows = []
+    for name, res in results.items():
+        r2_arr   = res["R²"]
+        rmse_arr = res["RMSE"]
+        mae_arr  = res["MAE"]
+
+        if name == "Bootstrap":
+            # 提供 OOB mean ± std 和 .632 校正值
+            row = {
+                "方法":          name,
+                "R² mean":       round(float(r2_arr.mean()),   4),
+                "R² std":        round(float(r2_arr.std()),    4),
+                "R² .632":       round(res.get("0.632_R²",  float("nan")), 4),
+                "RMSE mean":     round(float(rmse_arr.mean()), 4),
+                "RMSE std":      round(float(rmse_arr.std()),  4),
+                "RMSE .632":     round(res.get("0.632_RMSE", float("nan")), 4),
+                "MAE mean":      round(float(mae_arr.mean()),  4),
+                "MAE std":       round(float(mae_arr.std()),   4),
+                "MAE .632":      round(res.get("0.632_MAE",  float("nan")), 4),
+            }
+        elif name == "LOOCV":
+            row = {
+                "方法":          name,
+                "R² mean":       round(float(r2_arr[0]),   4),
+                "R² std":        "—",
+                "R² .632":       "—",
+                "RMSE mean":     round(float(rmse_arr[0]), 4),
+                "RMSE std":      "—",
+                "RMSE .632":     "—",
+                "MAE mean":      round(float(mae_arr[0]),  4),
+                "MAE std":       "—",
+                "MAE .632":      "—",
+            }
+        else:  # K-Fold
+            row = {
+                "方法":          f"K-Fold (k={kfold_k})",
+                "R² mean":       round(float(r2_arr.mean()),   4),
+                "R² std":        round(float(r2_arr.std()),    4),
+                "R² .632":       "—",
+                "RMSE mean":     round(float(rmse_arr.mean()), 4),
+                "RMSE std":      round(float(rmse_arr.std()),  4),
+                "RMSE .632":     "—",
+                "MAE mean":      round(float(mae_arr.mean()),  4),
+                "MAE std":       round(float(mae_arr.std()),   4),
+                "MAE .632":      "—",
+            }
+        summary_rows.append(row)
+
+    summary_df = pd.DataFrame(summary_rows).set_index("方法")
+    st.dataframe(summary_df, use_container_width=True)
+
+    # ── 2. Boxplot（K-Fold & Bootstrap per-fold 分布）────────
+    st.markdown("##### 📦 Per-Fold 分布 Boxplot（K-Fold & Bootstrap OOB）")
+    metrics_to_plot = ["R²", "RMSE", "MAE"]
+    pal = {"K-Fold": "#2e86ab", "Bootstrap": "#f4a261", "LOOCV": "#43aa8b"}
+
+    fig, axes = plt.subplots(1, 3, figsize=(14, 4.5))
+    for ax_i, metric in enumerate(metrics_to_plot):
+        data_dict = {}
+        for name, res in results.items():
+            arr = res[metric]
+            if arr is not None and len(arr) > 1:
+                lbl = f"K-Fold\n(k={kfold_k})" if name == "K-Fold" else name
+                data_dict[lbl] = arr
+
+        if not data_dict:
+            axes[ax_i].set_visible(False); continue
+
+        labels = list(data_dict.keys())
+        bp = axes[ax_i].boxplot(
+            [data_dict[l] for l in labels],
+            labels=labels, patch_artist=True, notch=False,
+            medianprops=dict(color="black", lw=2),
+        )
+        colors_bp = [pal.get(l.split("\n")[0], "#9b5de5") for l in labels]
+        for patch, c in zip(bp["boxes"], colors_bp):
+            patch.set_facecolor(c); patch.set_alpha(0.65)
+
+        # LOOCV 單點標注
+        if "LOOCV" in results:
+            loocv_val = float(results["LOOCV"][metric][0])
+            axes[ax_i].axhline(loocv_val, color=pal["LOOCV"],
+                               lw=2, ls="--", label=f"LOOCV={loocv_val:.4f}")
+            axes[ax_i].legend(fontsize=8)
+
+        # Bootstrap .632 標注
+        if "Bootstrap" in results:
+            key_632 = f"0.632_{metric}"
+            val_632 = results["Bootstrap"].get(key_632)
+            if val_632 is not None:
+                axes[ax_i].axhline(float(val_632), color="#e84855",
+                                   lw=1.5, ls=":", label=f".632={val_632:.4f}")
+                axes[ax_i].legend(fontsize=8)
+
+        axes[ax_i].set_title(f"{metric} Distribution", fontsize=11)
+        axes[ax_i].set_ylabel(metric)
+        axes[ax_i].grid(axis="y", alpha=0.3)
+
+    plt.suptitle("CV Method Comparison — Per-Fold Score Distribution",
+                 fontsize=12, fontweight="bold")
+    plt.tight_layout()
+    st.pyplot(fig); plt.close()
+
+    # ── 3. OOF Actual vs Predicted（各方法） ─────────────────
+    st.markdown("##### 📈 Out-of-Fold Actual vs Predicted")
+    n_methods = len(results)
+    fig2, axes2 = plt.subplots(1, n_methods,
+                                figsize=(5.5 * n_methods, 5), squeeze=False)
+    for col_i, (name, res) in enumerate(results.items()):
+        ax = axes2[0][col_i]
+        yt = res.get("y_true"); yp = res.get("y_pred")
+        if yt is None or yp is None or len(yt) == 0:
+            ax.set_visible(False); continue
+        c = list(pal.values())[col_i % len(pal)]
+        mn = min(yt.min(), yp.min()); mx = max(yt.max(), yp.max())
+        ax.scatter(yt, yp, color=c, s=22, alpha=0.65, edgecolors="none")
+        ax.plot([mn, mx], [mn, mx], "k--", lw=1.5)
+        r2v = float(r2_score(yt, yp))
+        display_name = f"K-Fold (k={kfold_k})" if name == "K-Fold" else name
+        ax.set_title(f"{display_name}\nR²={r2v:.4f}", fontsize=10)
+        ax.set_xlabel("Actual"); ax.set_ylabel("Predicted")
+        ax.grid(alpha=0.3)
+
+    plt.tight_layout()
+    st.pyplot(fig2); plt.close()
+
+    # ── 4. Bootstrap 誤差分布直方圖 ──────────────────────────
+    if "Bootstrap" in results:
+        boot_res = results["Bootstrap"]
+        st.markdown("##### 🎯 Bootstrap OOB Score 分布（含 .632 校正）")
+        fig3, axes3 = plt.subplots(1, 3, figsize=(14, 4))
+        for ax_i, metric in enumerate(["R²", "RMSE", "MAE"]):
+            arr = boot_res[metric]
+            axes3[ax_i].hist(arr, bins=30, color="#f4a261", alpha=0.75,
+                             edgecolor="white")
+            axes3[ax_i].axvline(arr.mean(), color="#e84855", lw=2,
+                                label=f"OOB mean={arr.mean():.4f}")
+            val_632 = boot_res.get(f"0.632_{metric}")
+            if val_632:
+                axes3[ax_i].axvline(float(val_632), color="#2e86ab",
+                                    lw=2, ls="--",
+                                    label=f".632={float(val_632):.4f}")
+            axes3[ax_i].set_title(f"Bootstrap {metric} Distribution")
+            axes3[ax_i].set_xlabel(metric); axes3[ax_i].set_ylabel("Count")
+            axes3[ax_i].legend(fontsize=8); axes3[ax_i].grid(alpha=0.3)
+        plt.suptitle(f"Bootstrap CV OOB Distribution ({boot_n} iterations)",
+                     fontsize=11, fontweight="bold")
+        plt.tight_layout()
+        st.pyplot(fig3); plt.close()
+
+    st.success("✅ CV 比較完成！")
 
 
 # ═══════════════════════════════════════════════════════════
@@ -482,6 +688,10 @@ def _render_rf_tab(fi_subtab, X_fi, y_fi, top_n_fi):
                     n_features=X_fi.shape[1],
                     oob_r2=st.session_state.get("fi_oob_r2"),
                 )
+                _render_cv_comparison(
+                    st.session_state["fi_rf"], X_fi, y_fi,
+                    key_prefix="rf_cv",
+                )
 
 
 # ═══════════════════════════════════════════════════════════
@@ -639,6 +849,17 @@ def _render_lasso_tab(fi_subtab, X_fi, y_fi, top_n_fi):
                     cv_scores=st.session_state.get("_la_cv_scores"),
                     n_features=X_fi.shape[1],
                 )
+                # Lasso was trained on scaled X — wrap in Pipeline for CV
+                from sklearn.pipeline import Pipeline
+                lasso_pipe = Pipeline([
+                    ("scaler", StandardScaler()),
+                    ("lasso",  Lasso(
+                        alpha=st.session_state.get("lasso_alpha_val", 0.01),
+                        max_iter=st.session_state.get("lasso_max_iter", 1000),
+                        random_state=42,
+                    )),
+                ])
+                _render_cv_comparison(lasso_pipe, X_fi, y_fi, key_prefix="la_cv")
 
 
 # ═══════════════════════════════════════════════════════════
@@ -1160,6 +1381,10 @@ def _render_pls_tab(fi_subtab, X_fi, y_fi, top_n_fi):
                     y_test_pred=st.session_state.get("_pls_y_test_pred"),
                     cv_scores=st.session_state.get("_pls_cv_scores"),
                     n_features=X_fi.shape[1],
+                )
+                _render_cv_comparison(
+                    st.session_state["pls_model"], X_fi, y_fi,
+                    key_prefix="pls_cv",
                 )
 
 
