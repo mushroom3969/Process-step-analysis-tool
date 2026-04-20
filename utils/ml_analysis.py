@@ -10,8 +10,8 @@ import seaborn as sns
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.inspection import permutation_importance
 from sklearn.cross_decomposition import PLSRegression
-from sklearn.model_selection import cross_val_predict
-from sklearn.metrics import mean_squared_error, r2_score
+from sklearn.model_selection import cross_val_predict, KFold, LeaveOneOut
+from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
 from scipy.stats import f as f_dist
 
 
@@ -297,6 +297,192 @@ def build_pubmed_queries_with_gemini(features, target, context, api_key):
             qs.append((feat, kw + " " + proc_kw + " chromatography yield"))
     qs.append(("Overall", proc_kw + " yield optimization process parameters"))
     return qs
+
+
+# ── Model Validation: K-fold / LOOCV / Bootstrap ──────────────────────────────
+
+def _cv_metrics(y_true, y_pred):
+    """Compute R², RMSE, MAE for one fold."""
+    r2   = float(r2_score(y_true, y_pred))
+    rmse = float(np.sqrt(mean_squared_error(y_true, y_pred)))
+    mae  = float(mean_absolute_error(y_true, y_pred))
+    return r2, rmse, mae
+
+
+def compute_kfold_cv(model, X, y, n_splits=5, shuffle=True, random_state=42):
+    """
+    K-Fold Cross-Validation.
+
+    Parameters
+    ----------
+    model       : sklearn estimator (unfitted clone used per fold)
+    X, y        : features and target (array-like)
+    n_splits    : number of folds (k)
+
+    Returns
+    -------
+    dict with keys 'R²', 'RMSE', 'MAE' → np.ndarray of per-fold scores
+    and 'y_true', 'y_pred' → concatenated out-of-fold predictions
+    """
+    from sklearn.base import clone
+    X_arr = np.asarray(X, dtype=float)
+    y_arr = np.asarray(y, dtype=float).ravel()
+
+    kf = KFold(n_splits=n_splits, shuffle=shuffle, random_state=random_state)
+    r2_list, rmse_list, mae_list = [], [], []
+    y_true_all, y_pred_all = [], []
+
+    for train_idx, test_idx in kf.split(X_arr):
+        m = clone(model)
+        m.fit(X_arr[train_idx], y_arr[train_idx])
+        y_hat = m.predict(X_arr[test_idx])
+        r2, rmse, mae = _cv_metrics(y_arr[test_idx], y_hat)
+        r2_list.append(r2); rmse_list.append(rmse); mae_list.append(mae)
+        y_true_all.extend(y_arr[test_idx]); y_pred_all.extend(y_hat)
+
+    return {
+        "method":  f"{n_splits}-Fold CV",
+        "R²":      np.array(r2_list),
+        "RMSE":    np.array(rmse_list),
+        "MAE":     np.array(mae_list),
+        "y_true":  np.array(y_true_all),
+        "y_pred":  np.array(y_pred_all),
+    }
+
+
+def compute_loocv(model, X, y):
+    """
+    Leave-One-Out Cross-Validation (LOOCV).
+    Each sample is held out once; n folds total.
+
+    Returns
+    -------
+    Same structure as compute_kfold_cv.
+    Note: per-fold R² is not meaningful for n=1 test sets;
+    overall R² is computed from the full OOF prediction vector.
+    """
+    from sklearn.base import clone
+    X_arr = np.asarray(X, dtype=float)
+    y_arr = np.asarray(y, dtype=float).ravel()
+    n = len(y_arr)
+
+    loo = LeaveOneOut()
+    y_pred_all = np.empty(n)
+    rmse_list, mae_list = [], []
+
+    for train_idx, test_idx in loo.split(X_arr):
+        m = clone(model)
+        m.fit(X_arr[train_idx], y_arr[train_idx])
+        y_hat = m.predict(X_arr[test_idx])
+        y_pred_all[test_idx[0]] = y_hat[0]
+        rmse_list.append(abs(y_arr[test_idx[0]] - y_hat[0]))   # |e| per fold
+        mae_list.append(abs(y_arr[test_idx[0]] - y_hat[0]))
+
+    # Overall R² from the full OOF vector
+    overall_r2 = float(r2_score(y_arr, y_pred_all))
+    overall_rmse = float(np.sqrt(mean_squared_error(y_arr, y_pred_all)))
+    overall_mae  = float(mean_absolute_error(y_arr, y_pred_all))
+
+    return {
+        "method":       "LOOCV",
+        "R²":           np.array([overall_r2]),         # single overall value
+        "RMSE":         np.array([overall_rmse]),
+        "MAE":          np.array([overall_mae]),
+        "R²_per_fold":  None,                           # undefined for n=1 folds
+        "abs_err":      np.array(mae_list),             # per-sample absolute error
+        "y_true":       y_arr,
+        "y_pred":       y_pred_all,
+    }
+
+
+def compute_bootstrap_cv(model, X, y, n_boot=200, random_state=42):
+    """
+    Bootstrap .632 Cross-Validation.
+
+    Each iteration:
+      1. Draw n samples with replacement → bootstrap training set
+      2. Out-of-bag (OOB) samples → test set
+      3. Compute metrics on OOB set
+
+    The .632 estimator (Efron & Tibshirani 1997) combines bootstrap OOB
+    and train error to reduce optimism bias:
+        err_.632 = 0.368 * train_err + 0.632 * oob_err
+
+    Returns
+    -------
+    dict with keys 'R²', 'RMSE', 'MAE' → np.ndarray of per-bootstrap scores
+    and scalar '0.632_R²', '0.632_RMSE', '0.632_MAE'
+    and 'y_true_concat', 'y_pred_concat' for all OOB predictions
+    """
+    from sklearn.base import clone
+    X_arr = np.asarray(X, dtype=float)
+    y_arr = np.asarray(y, dtype=float).ravel()
+    n = len(y_arr)
+    rng = np.random.default_rng(random_state)
+
+    r2_list, rmse_list, mae_list = [], [], []
+    y_true_concat, y_pred_concat = [], []
+
+    for _ in range(n_boot):
+        boot_idx = rng.integers(0, n, size=n)
+        oob_mask = np.ones(n, dtype=bool)
+        oob_mask[np.unique(boot_idx)] = False
+        if oob_mask.sum() < 2:
+            continue
+        m = clone(model)
+        m.fit(X_arr[boot_idx], y_arr[boot_idx])
+        y_hat = m.predict(X_arr[oob_mask])
+        r2, rmse, mae = _cv_metrics(y_arr[oob_mask], y_hat)
+        r2_list.append(r2); rmse_list.append(rmse); mae_list.append(mae)
+        y_true_concat.extend(y_arr[oob_mask]); y_pred_concat.extend(y_hat)
+
+    r2_arr   = np.array(r2_list)
+    rmse_arr = np.array(rmse_list)
+    mae_arr  = np.array(mae_list)
+
+    # .632 correction: train error on full dataset
+    m_full = clone(model)
+    m_full.fit(X_arr, y_arr)
+    y_train_pred = m_full.predict(X_arr)
+    _, train_rmse, train_mae = _cv_metrics(y_arr, y_train_pred)
+    train_r2 = float(r2_score(y_arr, y_train_pred))
+
+    # .632 blended estimates
+    r2_632   = 0.368 * train_r2   + 0.632 * float(r2_arr.mean())
+    rmse_632 = 0.368 * train_rmse + 0.632 * float(rmse_arr.mean())
+    mae_632  = 0.368 * train_mae  + 0.632 * float(mae_arr.mean())
+
+    return {
+        "method":       f"Bootstrap ({n_boot} iter)",
+        "R²":           r2_arr,
+        "RMSE":         rmse_arr,
+        "MAE":          mae_arr,
+        "0.632_R²":     r2_632,
+        "0.632_RMSE":   rmse_632,
+        "0.632_MAE":    mae_632,
+        "y_true":       np.array(y_true_concat),
+        "y_pred":       np.array(y_pred_concat),
+    }
+
+
+def compare_cv_methods(model, X, y,
+                        kfold_k=5, boot_n=200, random_state=42):
+    """
+    Run all three CV methods and return results dict keyed by method name.
+
+    Returns
+    -------
+    {'K-Fold': {...}, 'LOOCV': {...}, 'Bootstrap': {...}}
+    """
+    results = {}
+    results["K-Fold"]    = compute_kfold_cv(model, X, y,
+                                             n_splits=kfold_k,
+                                             random_state=random_state)
+    results["LOOCV"]     = compute_loocv(model, X, y)
+    results["Bootstrap"] = compute_bootstrap_cv(model, X, y,
+                                                 n_boot=boot_n,
+                                                 random_state=random_state)
+    return results
 
 
 def call_gemini(api_key, prompt, max_tokens=6000):
