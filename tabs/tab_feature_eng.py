@@ -194,7 +194,7 @@ def _render_collinearity_merge(show_mean: bool = True):
         help="Pearson: 線性｜Spearman: 單調非線性｜MI: 任意非線性（含非單調）"
     )
 
-    if "MI" in corr_method_sel:
+    if "Mutual" in corr_method_sel:
         corr_method, corr_label, corr_col = 'mi', 'MI (nats)', 'MI'
         r_thr = st.slider("MI 門檻 (nats)", 0.0, 2.0, 0.1, 0.01, key="fe_r_thr_mi",
                           help="MI ≥ 此值 → 顯示為高依賴性配對；完全獨立時 MI ≈ 0")
