@@ -285,16 +285,23 @@ def _render_collinearity_merge(show_mean: bool = True):
         st.success("✅ 所有特徵 VIF 均低於警示門檻，無需處理。")
         return
 
-    # 配對結果快取（key 不含 r_thr，使得切門檻不需重算）
+    # ── 配對計算按鈕（獨立觸發，避免 spinner 打斷 render）──────
+    cache_key = f"{corr_method}_{','.join(sorted(high_vif_cols))}"
     pair_cache = st.session_state.get("fe_pair_cache")
-    cache_key  = f"{corr_method}_{','.join(sorted(high_vif_cols))}"
-    if pair_cache is None or pair_cache.get("key") != cache_key:
+    pair_df    = pair_cache["df"] if (pair_cache and pair_cache.get("key") == cache_key) else None
+
+    n_pairs_possible = len(high_vif_cols) * (len(high_vif_cols) - 1) // 2
+    btn_label = (
+        f"📊 計算配對相關（{corr_label}，共 {n_pairs_possible} 對）"
+        if pair_df is None
+        else f"🔄 重新計算配對相關（{corr_label}）"
+    )
+    if st.button(btn_label, key="run_pair", type="secondary"):
         if corr_method == 'mi':
             if len(high_vif_cols) > 30:
                 st.warning(f"⚠️ 高 VIF 特徵共 {len(high_vif_cols)} 個，MI 計算可能較慢。")
             try:
-                with st.spinner(f"計算 Mutual Information（{len(high_vif_cols)} 個特徵）..."):
-                    pair_df = _compute_mi_pairs(clean_df, high_vif_cols)
+                pair_df = _compute_mi_pairs(clean_df, high_vif_cols)
             except Exception as e:
                 st.error(f"MI 計算失敗：{e}")
                 return
@@ -305,17 +312,19 @@ def _render_collinearity_merge(show_mean: bool = True):
                 st.error(f"配對相關計算失敗：{e}")
                 return
         st.session_state["fe_pair_cache"] = {"key": cache_key, "df": pair_df}
-    else:
-        pair_df = pair_cache["df"]
+        st.rerun()
 
-    st.markdown(f"#### 🔍 高 VIF 特徵配對分析")
-
-    # 始終顯示完整配對表（讓使用者看到所有 score，再用門檻篩選行動區）
-    if pair_df.empty:
-        st.info("高 VIF 特徵數不足，無法計算配對相關。")
+    if pair_df is None:
+        st.info("點擊上方按鈕計算配對相關。")
         return
 
-    # MI：Top-20 長條圖（顯示全部 score，門檻線標示）
+    st.markdown("#### 🔍 高 VIF 特徵配對分析")
+
+    if pair_df.empty:
+        st.info("高 VIF 特徵數不足（需 ≥ 2 個），無法計算配對相關。")
+        return
+
+    # MI：Top-20 長條圖（全部 score 顯示，門檻線標示）
     if corr_method == 'mi':
         top_all = pair_df.head(20)
         pair_labels = [
@@ -330,7 +339,7 @@ def _render_collinearity_merge(show_mean: bool = True):
         ax2.set_title('Top 20 MI Pairs（紫色 ≥ 門檻）', fontsize=10)
         ax2.invert_yaxis(); ax2.legend(fontsize=8); ax2.grid(axis='x', alpha=0.3)
         plt.tight_layout(); st.pyplot(fig2); plt.close(fig2)
-        st.caption(f"共計算 {len(pair_df)} 個配對，最大 MI = {pair_df['MI'].max():.4f}，門檻 = {r_thr}")
+        st.caption(f"共 {len(pair_df)} 個配對，最大 MI = {pair_df['MI'].max():.4f}，目前門檻 = {r_thr}")
 
     elif len(high_vif_cols) <= 25:
         sub = clean_df[high_vif_cols].fillna(clean_df[high_vif_cols].median())
