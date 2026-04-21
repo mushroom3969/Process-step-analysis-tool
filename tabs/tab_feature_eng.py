@@ -80,6 +80,207 @@ def _mini_trend(df: pd.DataFrame, col: str, color: str = "#2e86ab",
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# ── 共線性偵測 & 自動合併 ──────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+
+import re as _re
+
+def _group_key(col: str) -> str:
+    """
+    將特徵名稱正規化為「分組鍵」，把 Max/Min、編號、Before/After
+    等可辨識的差異字詞替換為佔位符，相同 base 的特徵會得到相同的 key。
+    """
+    s = _re.sub(r'\s*\([^)]*\)\s*$', '', col.strip())          # 去除單位
+    s = _re.sub(                                                 # Max / Min
+        r'\b(Maximum|Minimum|Maximun|Minimun)\b',
+        '__MM__', s, flags=_re.IGNORECASE)
+    s = _re.sub(                                                 # max / min 小寫
+        r'(?<![A-Za-z])(maximun?|minimun?|max|min)(?![A-Za-z])',
+        '__MM__', s, flags=_re.IGNORECASE)
+    s = _re.sub(r'[_ ]No\.?\s*\d+\s*$', '__N__', s)            # _No1 / _No2
+    s = _re.sub(r'[_ ]\d+\s*$', '__N__', s)                    # _1 / _2 / _4
+    s = _re.sub(                                                 # before / after
+        r'\b(before|after)\b', '__BA__', s, flags=_re.IGNORECASE)
+    return s.strip().rstrip('_').strip()
+
+
+def _detect_collinear_groups(df: pd.DataFrame,
+                              r_threshold: float = 0.85) -> list[dict]:
+    """
+    1. 對所有數值特徵計算分組鍵
+    2. 同鍵 & 組內至少 2 個特徵 → 計算 pairwise |Pearson r|
+    3. 組內 max |r| > r_threshold → 標記為「可合併」群組
+
+    回傳 list of dict：
+      { 'key': str, 'cols': list, 'max_r': float, 'mergeable': bool,
+        'corr_matrix': pd.DataFrame }
+    """
+    num_cols = [c for c in df.select_dtypes(include='number').columns
+                if c.lower() != 'batchid']
+    if len(num_cols) < 2:
+        return []
+
+    key_map: dict[str, list[str]] = {}
+    for col in num_cols:
+        k = _group_key(col)
+        key_map.setdefault(k, []).append(col)
+
+    groups = []
+    for key, cols in key_map.items():
+        if len(cols) < 2:
+            continue
+        sub = df[cols].dropna(how='all')
+        if len(sub) < 3:
+            continue
+        corr = sub.corr(method='pearson').abs()
+        # 取上三角排除自身
+        mask = np.triu(np.ones(corr.shape, dtype=bool), k=1)
+        vals = corr.values[mask]
+        max_r = float(np.nanmax(vals)) if len(vals) > 0 else 0.0
+        groups.append({
+            'key':         key,
+            'cols':        cols,
+            'max_r':       max_r,
+            'mergeable':   max_r >= r_threshold,
+            'corr_matrix': corr,
+        })
+
+    groups.sort(key=lambda g: -g['max_r'])
+    return groups
+
+
+def _render_collinearity_merge(show_mean: bool = True):
+    """Step 2.5 UI：共線性偵測 & 自動合併"""
+    st.markdown("---")
+    st.markdown("### 🔗 Step 2.5：共線性偵測 & 自動合併")
+    st.caption(
+        "偵測 Max/Min 配對、重複量測（_1/_2）、Before/After 配對等高度相關特徵群組，"
+        "若組內 Pearson |r| 超過門檻，可一鍵合併為均值欄位。"
+    )
+
+    clean_df = st.session_state.get("clean_df")
+    if clean_df is None:
+        return
+
+    col_thr, col_run = st.columns([1, 1])
+    r_thr = col_thr.slider(
+        "共線性門檻 |r| ≥", 0.5, 1.0, 0.85, 0.01,
+        key="fe_col_thr",
+        help="組內任意兩特徵 Pearson |r| 超過此值 → 標示為可合併"
+    )
+
+    if not col_run.button("🔍 偵測共線性群組", key="run_col_detect", type="primary"):
+        st.info("設定門檻後點擊「🔍 偵測共線性群組」。")
+        return
+
+    with st.spinner("計算中..."):
+        groups = _detect_collinear_groups(clean_df, r_threshold=r_thr)
+
+    if not groups:
+        st.success("✅ 未偵測到共線性群組（所有特徵組內 |r| 均低於門檻）。")
+        return
+
+    mergeable   = [g for g in groups if g['mergeable']]
+    unmergeable = [g for g in groups if not g['mergeable']]
+
+    st.info(
+        f"共偵測到 **{len(groups)}** 個命名相似群組，"
+        f"其中 **{len(mergeable)}** 組超過門檻（|r| ≥ {r_thr}）建議合併，"
+        f"**{len(unmergeable)}** 組低於門檻保留。"
+    )
+
+    # ── 可合併群組 ─────────────────────────────────────────────────
+    if mergeable:
+        st.markdown(f"#### ✅ 可合併群組（|r| ≥ {r_thr}）")
+
+        merge_selections = {}
+        for i, g in enumerate(mergeable):
+            label = f"**Group {i+1}** — max |r| = {g['max_r']:.3f}  ({len(g['cols'])} 個特徵)"
+            with st.expander(label, expanded=(i < 3)):
+                # 相關矩陣熱圖
+                fig, ax = plt.subplots(figsize=(max(3, len(g['cols']) * 1.2),
+                                                max(2.5, len(g['cols']) * 1.0)))
+                import seaborn as _sns_col
+                _sns_col.heatmap(
+                    g['corr_matrix'], annot=True, fmt=".2f",
+                    cmap="RdYlGn", vmin=0, vmax=1, center=0.5,
+                    linewidths=0.5, ax=ax, annot_kws={"size": 8}
+                )
+                ax.set_title(f"Pairwise |r|", fontsize=9)
+                plt.xticks(rotation=30, ha='right', fontsize=7)
+                plt.yticks(fontsize=7)
+                plt.tight_layout()
+                st.pyplot(fig, use_container_width=False)
+                plt.close(fig)
+
+                # 特徵列表
+                for c in g['cols']:
+                    st.markdown(f"  - `{c}`")
+
+                # 建議合併名稱（取最短的 col 去掉識別符）
+                suggested = min(g['cols'], key=len)
+                new_name = st.text_input(
+                    "合併後新欄位名稱",
+                    value=f"MERGED_{suggested[:50]}",
+                    key=f"fe_merge_name_{i}"
+                )
+                do_merge = st.checkbox(
+                    f"✔ 納入合併（→ mean）", value=True, key=f"fe_do_merge_{i}"
+                )
+                merge_selections[i] = {
+                    'cols': g['cols'], 'new_name': new_name, 'do_merge': do_merge
+                }
+
+        # ── 執行合併按鈕 ────────────────────────────────────────────
+        if st.button("⚡ 執行合併", key="fe_run_merge", type="primary"):
+            df_work = clean_df.copy()
+            merged_log = []
+
+            for i, sel in merge_selections.items():
+                if not sel['do_merge']:
+                    continue
+                cols_to_merge = [c for c in sel['cols'] if c in df_work.columns]
+                if len(cols_to_merge) < 2:
+                    continue
+                new_col = sel['new_name'].strip() or f"MERGED_{i}"
+                df_work[new_col] = df_work[cols_to_merge].mean(axis=1)
+                df_work.drop(columns=cols_to_merge, inplace=True)
+                merged_log.append({
+                    'new_col': new_col,
+                    'merged_from': cols_to_merge,
+                    'n': len(cols_to_merge)
+                })
+
+            if not merged_log:
+                st.warning("沒有選擇任何群組合併。")
+            else:
+                snapshot_before = clean_df.copy()
+                st.session_state["clean_df"] = df_work
+
+                cols_removed = [c for m in merged_log for c in m['merged_from']]
+                cols_added   = [m['new_col'] for m in merged_log]
+                _push_op("collinear_merge", cols_removed, cols_added, snapshot_before)
+
+                st.success(
+                    f"✅ 完成！合併 {len(merged_log)} 個群組，"
+                    f"移除 {len(cols_removed)} 欄 → 新增 {len(cols_added)} 欄（mean）"
+                )
+                for m in merged_log:
+                    st.caption(f"  `{m['new_col']}` ← {m['merged_from']}")
+                st.rerun()
+
+    # ── 低於門檻群組（僅顯示，不合併）────────────────────────────────
+    if unmergeable:
+        with st.expander(
+            f"ℹ️ 低於門檻群組（|r| < {r_thr}，保留原特徵）— {len(unmergeable)} 組",
+            expanded=False
+        ):
+            for g in unmergeable:
+                st.markdown(f"- max |r| = **{g['max_r']:.3f}** | " +
+                            " / ".join([f"`{c[:50]}`" for c in g['cols']]))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # ── Session-state 工具 ────────────────────────────────────────────────────────
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -421,6 +622,11 @@ def _render_main(selected_process_df, show_mean: bool = True):
                 section_title="Step 2 變更詳情", show_mean=show_mean
             )
 # ══════════════════════════════════════════════════════════════════════════
+    # ── 區塊 B5：Step 2.5 共線性偵測 & 自動合併 ──────────────────────────────
+    # ══════════════════════════════════════════════════════════════════════════
+    if st.session_state.get("clean_df") is not None:
+        _render_collinearity_merge(show_mean)
+
     # ── 區塊 C：當前特徵總覽（個別管理與反悔） ────────────────────────────────
     # ══════════════════════════════════════════════════════════════════════════
     if st.session_state.get("clean_df") is not None:
