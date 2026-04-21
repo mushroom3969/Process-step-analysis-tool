@@ -15,8 +15,7 @@ def clean_process_features_with_log(
     """
     自動清理製程特徵欄位：
       A. 關鍵字過濾（Verification Result / No (na)）
-      B. 配對差值（Max-Min、After-Before、End-Start）
-      C. 數字編號欄位取平均後合併
+    注意：Max/Min、Before/After、編號欄等配對合併已移至 Step 2.5（VIF 共線性診斷後決定）。
     回傳 (清理後 DataFrame, 刪除記錄 DataFrame)
     """
     if protected_cols is None:
@@ -40,118 +39,6 @@ def clean_process_features_with_log(
     for c in to_drop_kw:
         drop_log.append({"Column": c, "Reason": "Keyword Filter"})
     new_df = new_df.drop(columns=to_drop_kw)
-
-    def _clean_col_name(name: str) -> str:
-        return re.sub(r"\s?\(.*\)$", "", name).strip()
-
-    # ── Rule B: Min/Max → mean + range；Before/After、Start/End → diff ────
-    MIN_ALIASES = {"min", "minimum", "minimun", "low", "lower", "lo"}
-    MAX_ALIASES = {"max", "maximum", "maximun", "high", "upper", "hi"}
-    BEF_ALIASES = {"before", "bef", "bf", "pre", "initial", "init", "start"}
-    AFT_ALIASES = {"after", "aft", "af", "post", "final", "fin", "end"}
-
-    def _find_kw(name: str, aliases: set):
-        n = name.lower()
-        for kw in sorted(aliases, key=len, reverse=True):
-            pattern = r"(?<![a-z0-9])" + re.escape(kw) + r"(?![a-z0-9])"
-            if re.search(pattern, n):
-                return kw
-        return None
-
-    def _base(col: str, kw: str) -> str:
-        """移除關鍵字，回傳正規化後的 base 字串供配對用"""
-        n = col.lower()
-        pattern = r"(?<![a-z0-9])" + re.escape(kw) + r"(?![a-z0-9])"
-        base = re.sub(pattern, "", n)
-        # 清理：多個連續底線/空格壓縮為單一，再去除首尾
-        base = re.sub(r"_+", "_", base)
-        base = re.sub(r" +", " ", base)
-        base = base.strip("_- ")
-        return base
-
-    def _make_label(col: str, kw: str) -> str:
-        """從原始欄位名稱（保留大小寫）去除關鍵字，作為新欄位名稱的前綴"""
-        # 先用不分大小寫的方式移除關鍵字
-        pattern = r"(?<![a-zA-Z0-9])" + re.escape(kw) + r"(?![a-zA-Z0-9])"
-        label = re.sub(pattern, "", col, flags=re.IGNORECASE)
-        label = re.sub(r"_+", "_", label)
-        label = re.sub(r" +", " ", label)
-        label = label.strip("_- ")
-        return label
-
-    current_cols = list(new_df.columns)
-    min_map, max_map, bef_map, aft_map = {}, {}, {}, {}
-
-    for col in current_cols:
-        if col in whitelist:
-            continue
-        kw = _find_kw(col, MIN_ALIASES)
-        if kw:
-            b = _base(col, kw)
-            min_map.setdefault(b, col)
-            continue
-        kw = _find_kw(col, MAX_ALIASES)
-        if kw:
-            b = _base(col, kw)
-            max_map.setdefault(b, col)
-            continue
-        kw = _find_kw(col, BEF_ALIASES)
-        if kw:
-            b = _base(col, kw)
-            bef_map.setdefault(b, col)
-            continue
-        kw = _find_kw(col, AFT_ALIASES)
-        if kw:
-            b = _base(col, kw)
-            aft_map.setdefault(b, col)
-
-    # Min/Max → mean + range
-    for b in sorted(set(min_map) & set(max_map)):
-        c_min, c_max = min_map[b], max_map[b]
-        # 用 _make_label 保留原始大小寫；以 min 那欄為基準
-        kw_min = _find_kw(c_min, MIN_ALIASES)
-        label  = _make_label(c_min, kw_min) if kw_min else b.strip("_- ")
-        if not label:
-            label = f"{c_min}_{c_max}"
-        mean_col  = f"{label}_mean"
-        range_col = f"{label}_range"
-        new_df[mean_col]  = (new_df[c_min] + new_df[c_max]) / 2
-        new_df[range_col] = new_df[c_max] - new_df[c_min]
-        drop_log.append({"Column": c_min, "Reason": f"Merged into {mean_col}, {range_col}"})
-        drop_log.append({"Column": c_max, "Reason": f"Merged into {mean_col}, {range_col}"})
-        new_df = new_df.drop(columns=[c_min, c_max])
-
-    # Before/After、Start/End → diff (after/end − before/start)
-    for b in sorted(set(bef_map) & set(aft_map)):
-        c_bef, c_aft = bef_map[b], aft_map[b]
-        kw_bef = _find_kw(c_bef, BEF_ALIASES)
-        label  = _make_label(c_bef, kw_bef) if kw_bef else b.strip("_- ")
-        if not label:
-            label = f"{c_bef}_{c_aft}"
-        diff_col = f"{label}_diff"
-        new_df[diff_col] = new_df[c_aft] - new_df[c_bef]
-        drop_log.append({"Column": c_bef, "Reason": f"Merged into {diff_col}"})
-        drop_log.append({"Column": c_aft, "Reason": f"Merged into {diff_col}"})
-        new_df = new_df.drop(columns=[c_bef, c_aft])
-
-    # ── Rule C: 數字編號欄位 → 取平均 ─────────────────────────
-    pattern = r"^(.*)_(\d+)\s?(\(.*\))$"
-    group_dict: dict[str, list] = {}
-    for c in new_df.columns:
-        if c in whitelist:
-            continue
-        m = re.match(pattern, c)
-        if m:
-            base_name, _, unit = m.groups()
-            key = f"{base_name.strip('_')} {unit}"
-            group_dict.setdefault(key, []).append(c)
-
-    for key, grouped_cols in group_dict.items():
-        if len(grouped_cols) > 1:
-            for c in grouped_cols:
-                drop_log.append({"Column": c, "Reason": f"Averaged into: {key}"})
-            new_df[key] = new_df[grouped_cols].mean(axis=1)
-            new_df = new_df.drop(columns=grouped_cols)
 
     return new_df, pd.DataFrame(drop_log)
 
