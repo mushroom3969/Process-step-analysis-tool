@@ -28,6 +28,7 @@ from tabs import tab_stat_test         # render(selected_process_df)
 from tabs import tab_trend             # render(selected_process_df)
 from tabs import tab_literature        # render()
 from tabs import tab_causal            # render(selected_process_df)
+from tabs import tab_yield_monitor     # render(raw_df)
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -250,6 +251,7 @@ if selected_steps:
 # ── Tabs ──────────────────────────────────────────────────────────────────────
 tabs = st.tabs([
     " 跨製程監控",
+    " 良率監控",
     " 資料總覽",
     " 趨勢圖",
     " 特徵工程",
@@ -266,31 +268,34 @@ with tabs[0]:
     tab_cross_process.render(raw_df)
 
 with tabs[1]:
-    tab_overview.render(raw_df, dfs_dict, selected_process_df, selected_process)
+    tab_yield_monitor.render(raw_df)
 
 with tabs[2]:
-    tab_trend.render(active_df)
+    tab_overview.render(raw_df, dfs_dict, selected_process_df, selected_process)
 
 with tabs[3]:
-    tab_feature_eng.render(selected_process_df)
+    tab_trend.render(active_df)
 
 with tabs[4]:
-    tab_missing.render(active_df)
+    tab_feature_eng.render(selected_process_df)
 
 with tabs[5]:
-    tab_correlation.render(active_df)
+    tab_missing.render(active_df)
 
 with tabs[6]:
-    tab_pca.render(active_df)
+    tab_correlation.render(active_df)
 
 with tabs[7]:
-    tab_feature_importance.render(active_df)
+    tab_pca.render(active_df)
 
 with tabs[8]:
-    tab_stat_test.render(active_df)
+    tab_feature_importance.render(active_df)
 
 with tabs[9]:
-    tab_literature.render()
+    tab_stat_test.render(active_df)
 
 with tabs[10]:
+    tab_literature.render()
+
+with tabs[11]:
     tab_causal.render(active_df)
