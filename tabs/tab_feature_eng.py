@@ -80,204 +80,222 @@ def _mini_trend(df: pd.DataFrame, col: str, color: str = "#2e86ab",
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# ── 共線性偵測 & 自動合併 ──────────────────────────────────────────────────────
+# ── 多重共線性診斷（VIF + Pairwise |r|）────────────────────────────────────────
 # ══════════════════════════════════════════════════════════════════════════════
 
-import re as _re
-
-def _group_key(col: str) -> str:
+def _compute_vif(df: pd.DataFrame) -> pd.DataFrame:
     """
-    將特徵名稱正規化為「分組鍵」，把 Max/Min、編號、Before/After
-    等可辨識的差異字詞替換為佔位符，相同 base 的特徵會得到相同的 key。
+    計算每個數值特徵的 VIF（Variance Inflation Factor）。
+    VIF_i = 1 / (1 - R²_i)，其中 R²_i 是以其餘特徵迴歸第 i 個特徵的 R²。
+    缺失值以欄位中位數填補後計算。
     """
-    s = _re.sub(r'\s*\([^)]*\)\s*$', '', col.strip())          # 去除單位
-    s = _re.sub(                                                 # Max / Min
-        r'\b(Maximum|Minimum|Maximun|Minimun)\b',
-        '__MM__', s, flags=_re.IGNORECASE)
-    s = _re.sub(                                                 # max / min 小寫
-        r'(?<![A-Za-z])(maximun?|minimun?|max|min)(?![A-Za-z])',
-        '__MM__', s, flags=_re.IGNORECASE)
-    s = _re.sub(r'[_ ]No\.?\s*\d+\s*$', '__N__', s)            # _No1 / _No2
-    s = _re.sub(r'[_ ]\d+\s*$', '__N__', s)                    # _1 / _2 / _4
-    s = _re.sub(                                                 # before / after
-        r'\b(before|after)\b', '__BA__', s, flags=_re.IGNORECASE)
-    return s.strip().rstrip('_').strip()
-
-
-def _detect_collinear_groups(df: pd.DataFrame,
-                              r_threshold: float = 0.85) -> list[dict]:
-    """
-    1. 對所有數值特徵計算分組鍵
-    2. 同鍵 & 組內至少 2 個特徵 → 計算 pairwise |Pearson r|
-    3. 組內 max |r| > r_threshold → 標記為「可合併」群組
-
-    回傳 list of dict：
-      { 'key': str, 'cols': list, 'max_r': float, 'mergeable': bool,
-        'corr_matrix': pd.DataFrame }
-    """
+    from sklearn.linear_model import LinearRegression
     num_cols = [c for c in df.select_dtypes(include='number').columns
                 if c.lower() != 'batchid']
     if len(num_cols) < 2:
-        return []
+        return pd.DataFrame(columns=['Feature', 'VIF'])
 
-    key_map: dict[str, list[str]] = {}
+    X = df[num_cols].copy()
+    X = X.fillna(X.median())
+
+    vif_vals = []
     for col in num_cols:
-        k = _group_key(col)
-        key_map.setdefault(k, []).append(col)
-
-    groups = []
-    for key, cols in key_map.items():
-        if len(cols) < 2:
+        y = X[col].values
+        others = X.drop(columns=[col]).values
+        if others.shape[1] == 0:
+            vif_vals.append(np.nan)
             continue
-        sub = df[cols].dropna(how='all')
-        if len(sub) < 3:
-            continue
-        corr = sub.corr(method='pearson').abs()
-        # 取上三角排除自身
-        mask = np.triu(np.ones(corr.shape, dtype=bool), k=1)
-        vals = corr.values[mask]
-        max_r = float(np.nanmax(vals)) if len(vals) > 0 else 0.0
-        groups.append({
-            'key':         key,
-            'cols':        cols,
-            'max_r':       max_r,
-            'mergeable':   max_r >= r_threshold,
-            'corr_matrix': corr,
-        })
+        r2 = LinearRegression().fit(others, y).score(others, y)
+        vif = 1.0 / (1.0 - r2) if r2 < 1.0 else np.inf
+        vif_vals.append(round(float(vif), 2))
 
-    groups.sort(key=lambda g: -g['max_r'])
-    return groups
+    vif_df = pd.DataFrame({'Feature': num_cols, 'VIF': vif_vals})
+    return vif_df.sort_values('VIF', ascending=False).reset_index(drop=True)
+
+
+def _high_vif_pairs(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
+    """計算指定欄位間的 pairwise Pearson |r|，回傳上三角配對表。"""
+    sub = df[cols].fillna(df[cols].median())
+    corr = sub.corr(method='pearson').abs()
+    rows = []
+    for i in range(len(cols)):
+        for j in range(i + 1, len(cols)):
+            rows.append({
+                'Feature A': cols[i],
+                'Feature B': cols[j],
+                '|r|': round(float(corr.iloc[i, j]), 3),
+            })
+    return pd.DataFrame(rows).sort_values('|r|', ascending=False).reset_index(drop=True)
 
 
 def _render_collinearity_merge(show_mean: bool = True):
-    """Step 2.5 UI：共線性偵測 & 自動合併"""
+    """Step 2.5 UI：VIF + Pairwise |r| 多重共線性診斷 & 處理"""
     st.markdown("---")
-    st.markdown("### 🔗 Step 2.5：共線性偵測 & 自動合併")
+    st.markdown("### 🔗 Step 2.5：多重共線性診斷（VIF + Pairwise |r|）")
     st.caption(
-        "偵測 Max/Min 配對、重複量測（_1/_2）、Before/After 配對等高度相關特徵群組，"
-        "若組內 Pearson |r| 超過門檻，可一鍵合併為均值欄位。"
+        "Step 1 已處理 Max/Min → mean+range、Before/After → diff、編號欄 → mean。"
+        "此步驟針對**剩餘特徵**計算 VIF 與 Pairwise |r|，"
+        "找出 Step 1 未涵蓋的殘餘共線性，可選擇合併（mean）或直接刪除。"
     )
 
     clean_df = st.session_state.get("clean_df")
     if clean_df is None:
         return
 
-    col_thr, col_run = st.columns([1, 1])
-    r_thr = col_thr.slider(
-        "共線性門檻 |r| ≥", 0.5, 1.0, 0.85, 0.01,
-        key="fe_col_thr",
-        help="組內任意兩特徵 Pearson |r| 超過此值 → 標示為可合併"
-    )
-
-    if not col_run.button("🔍 偵測共線性群組", key="run_col_detect", type="primary"):
-        st.info("設定門檻後點擊「🔍 偵測共線性群組」。")
+    num_cols = [c for c in clean_df.select_dtypes(include='number').columns
+                if c.lower() != 'batchid']
+    if len(num_cols) < 2:
+        st.info("數值特徵不足 2 欄，無法計算 VIF。")
         return
 
-    with st.spinner("計算中..."):
-        groups = _detect_collinear_groups(clean_df, r_threshold=r_thr)
+    c1, c2, c3 = st.columns(3)
+    vif_warn  = c1.slider("VIF 警示門檻", 2.0, 20.0, 5.0,  0.5, key="fe_vif_warn",
+                           help="VIF ≥ 此值 → 黃色警示")
+    vif_high  = c2.slider("VIF 嚴重門檻", 5.0, 50.0, 10.0, 1.0, key="fe_vif_high",
+                           help="VIF ≥ 此值 → 紅色嚴重")
+    r_thr     = c3.slider("配對 |r| 門檻", 0.5, 1.0, 0.85, 0.01, key="fe_r_thr",
+                           help="Pairwise |r| ≥ 此值 → 顯示為高度相關配對")
 
-    if not groups:
-        st.success("✅ 未偵測到共線性群組（所有特徵組內 |r| 均低於門檻）。")
+    if not st.button("🔍 執行共線性診斷", key="run_vif", type="primary"):
+        st.info("點擊「🔍 執行共線性診斷」開始。")
         return
 
-    mergeable   = [g for g in groups if g['mergeable']]
-    unmergeable = [g for g in groups if not g['mergeable']]
+    with st.spinner(f"計算 {len(num_cols)} 個特徵的 VIF..."):
+        vif_df = _compute_vif(clean_df)
 
-    st.info(
-        f"共偵測到 **{len(groups)}** 個命名相似群組，"
-        f"其中 **{len(mergeable)}** 組超過門檻（|r| ≥ {r_thr}）建議合併，"
-        f"**{len(unmergeable)}** 組低於門檻保留。"
+    # ── VIF 總覽表 ──────────────────────────────────────────────────
+    st.markdown("#### 📋 VIF 總覽")
+
+    def _vif_color(val):
+        if not isinstance(val, (int, float)) or np.isnan(val):
+            return ''
+        if val >= vif_high: return 'background-color:#FFCCCC'
+        if val >= vif_warn: return 'background-color:#FFF3CC'
+        return 'background-color:#CCFFCC'
+
+    n_ok   = int((vif_df['VIF'] < vif_warn).sum())
+    n_warn = int(((vif_df['VIF'] >= vif_warn) & (vif_df['VIF'] < vif_high)).sum())
+    n_high = int((vif_df['VIF'] >= vif_high).sum())
+
+    mc1, mc2, mc3 = st.columns(3)
+    mc1.metric("✅ VIF 正常 (< {:.0f})".format(vif_warn), n_ok)
+    mc2.metric("⚠️ 警示 ({:.0f}–{:.0f})".format(vif_warn, vif_high), n_warn)
+    mc3.metric("🚨 嚴重 (≥ {:.0f})".format(vif_high), n_high)
+
+    st.dataframe(
+        vif_df.style.applymap(_vif_color, subset=['VIF']),
+        use_container_width=True, hide_index=True, height=300
     )
 
-    # ── 可合併群組 ─────────────────────────────────────────────────
-    if mergeable:
-        st.markdown(f"#### ✅ 可合併群組（|r| ≥ {r_thr}）")
+    # ── VIF 長條圖（Top 20）──────────────────────────────────────────
+    top_vif = vif_df.head(20)
+    bar_colors = [
+        '#FF6B6B' if v >= vif_high else '#FFD93D' if v >= vif_warn else '#6BCB77'
+        for v in top_vif['VIF']
+    ]
+    fig, ax = plt.subplots(figsize=(10, max(4, len(top_vif) * 0.38)))
+    ax.barh(top_vif['Feature'].str[-50:], top_vif['VIF'],
+            color=bar_colors, alpha=0.85)
+    ax.axvline(vif_warn, color='#FFD93D', lw=1.5, ls='--',
+               label=f'VIF={vif_warn:.0f} (警示)')
+    ax.axvline(vif_high, color='#FF6B6B', lw=1.5, ls='--',
+               label=f'VIF={vif_high:.0f} (嚴重)')
+    ax.set_xlabel('VIF'); ax.invert_yaxis()
+    ax.set_title('Top 20 Features by VIF', fontsize=11)
+    ax.legend(fontsize=8); ax.grid(axis='x', alpha=0.3)
+    plt.tight_layout(); st.pyplot(fig); plt.close(fig)
 
-        merge_selections = {}
-        for i, g in enumerate(mergeable):
-            label = f"**Group {i+1}** — max |r| = {g['max_r']:.3f}  ({len(g['cols'])} 個特徵)"
-            with st.expander(label, expanded=(i < 3)):
-                # 相關矩陣熱圖
-                fig, ax = plt.subplots(figsize=(max(3, len(g['cols']) * 1.2),
-                                                max(2.5, len(g['cols']) * 1.0)))
-                import seaborn as _sns_col
-                _sns_col.heatmap(
-                    g['corr_matrix'], annot=True, fmt=".2f",
-                    cmap="RdYlGn", vmin=0, vmax=1, center=0.5,
-                    linewidths=0.5, ax=ax, annot_kws={"size": 8}
+    # ── 高 VIF 特徵的 Pairwise |r| ──────────────────────────────────
+    high_vif_cols = vif_df.loc[vif_df['VIF'] >= vif_warn, 'Feature'].tolist()
+
+    if not high_vif_cols:
+        st.success("✅ 所有特徵 VIF 均低於警示門檻，無需處理。")
+        return
+
+    st.markdown(f"#### 🔍 高 VIF 特徵配對分析（|r| ≥ {r_thr}）")
+    pair_df = _high_vif_pairs(clean_df, high_vif_cols)
+    high_pairs = pair_df[pair_df['|r|'] >= r_thr].reset_index(drop=True)
+
+    if high_pairs.empty:
+        st.info(f"高 VIF 特徵間 pairwise |r| 均低於 {r_thr}，"
+                "可能是多個特徵共同造成的多重共線性（非單一配對）。")
+    else:
+        st.dataframe(high_pairs, use_container_width=True, hide_index=True)
+
+        # 熱圖
+        if len(high_vif_cols) <= 25:
+            sub = clean_df[high_vif_cols].fillna(clean_df[high_vif_cols].median())
+            corr_mat = sub.corr(method='pearson').abs()
+            short_names = {c: c.split(':')[-1][:35] for c in high_vif_cols}
+            corr_mat.index   = [short_names[c] for c in high_vif_cols]
+            corr_mat.columns = [short_names[c] for c in high_vif_cols]
+            sz = max(6, len(high_vif_cols) * 0.55)
+            fig2, ax2 = plt.subplots(figsize=(sz, sz))
+            sns.heatmap(corr_mat, annot=True, fmt='.2f', cmap='RdYlGn_r',
+                        vmin=0, vmax=1, linewidths=0.4, ax=ax2,
+                        annot_kws={'size': 7})
+            ax2.set_title('High-VIF Feature Pairwise |r|', fontsize=10)
+            plt.xticks(rotation=35, ha='right', fontsize=7)
+            plt.yticks(fontsize=7)
+            plt.tight_layout(); st.pyplot(fig2); plt.close(fig2)
+
+        # ── 處理選項 ────────────────────────────────────────────────
+        st.markdown("#### ⚡ 處理高度相關配對")
+        st.caption("對每個高度相關配對選擇處理方式：合併為 mean、刪除其中一欄、或保留。")
+
+        action_map = {}
+        for idx, row in high_pairs.iterrows():
+            fa, fb, r_val = row['Feature A'], row['Feature B'], row['|r|']
+            with st.expander(
+                f"|r| = {r_val:.3f}  |  `{fa.split(':')[-1][:45]}` ↔ `{fb.split(':')[-1][:45]}`",
+                expanded=(idx < 3)
+            ):
+                act = st.radio(
+                    "處理方式",
+                    ["保留兩欄", f"合併為 mean → 新欄", f"刪除 A", f"刪除 B"],
+                    key=f"fe_act_{idx}", horizontal=True
                 )
-                ax.set_title(f"Pairwise |r|", fontsize=9)
-                plt.xticks(rotation=30, ha='right', fontsize=7)
-                plt.yticks(fontsize=7)
-                plt.tight_layout()
-                st.pyplot(fig, use_container_width=False)
-                plt.close(fig)
+                new_name = ""
+                if "合併" in act:
+                    new_name = st.text_input(
+                        "新欄位名稱",
+                        value=f"{fa.split(':')[-1][:30]}_mean",
+                        key=f"fe_mname_{idx}"
+                    )
+                action_map[idx] = {'fa': fa, 'fb': fb, 'act': act, 'new_name': new_name}
 
-                # 特徵列表
-                for c in g['cols']:
-                    st.markdown(f"  - `{c}`")
-
-                # 建議合併名稱（取最短的 col 去掉識別符）
-                suggested = min(g['cols'], key=len)
-                new_name = st.text_input(
-                    "合併後新欄位名稱",
-                    value=f"MERGED_{suggested[:50]}",
-                    key=f"fe_merge_name_{i}"
-                )
-                do_merge = st.checkbox(
-                    f"✔ 納入合併（→ mean）", value=True, key=f"fe_do_merge_{i}"
-                )
-                merge_selections[i] = {
-                    'cols': g['cols'], 'new_name': new_name, 'do_merge': do_merge
-                }
-
-        # ── 執行合併按鈕 ────────────────────────────────────────────
-        if st.button("⚡ 執行合併", key="fe_run_merge", type="primary"):
+        if st.button("⚡ 執行處理", key="fe_vif_exec", type="primary"):
             df_work = clean_df.copy()
-            merged_log = []
+            ops_log = []
 
-            for i, sel in merge_selections.items():
-                if not sel['do_merge']:
+            for idx, info in action_map.items():
+                fa, fb = info['fa'], info['fb']
+                act = info['act']
+                if '保留' in act:
                     continue
-                cols_to_merge = [c for c in sel['cols'] if c in df_work.columns]
-                if len(cols_to_merge) < 2:
-                    continue
-                new_col = sel['new_name'].strip() or f"MERGED_{i}"
-                df_work[new_col] = df_work[cols_to_merge].mean(axis=1)
-                df_work.drop(columns=cols_to_merge, inplace=True)
-                merged_log.append({
-                    'new_col': new_col,
-                    'merged_from': cols_to_merge,
-                    'n': len(cols_to_merge)
-                })
+                if '合併' in act:
+                    nn = info['new_name'].strip() or f"{fa[:20]}_mean"
+                    if fa in df_work and fb in df_work:
+                        df_work[nn] = df_work[[fa, fb]].mean(axis=1)
+                        df_work.drop(columns=[fa, fb], inplace=True, errors='ignore')
+                        ops_log.append(('merge', [fa, fb], [nn]))
+                elif '刪除 A' in act and fa in df_work:
+                    df_work.drop(columns=[fa], inplace=True, errors='ignore')
+                    ops_log.append(('drop', [fa], []))
+                elif '刪除 B' in act and fb in df_work:
+                    df_work.drop(columns=[fb], inplace=True, errors='ignore')
+                    ops_log.append(('drop', [fb], []))
 
-            if not merged_log:
-                st.warning("沒有選擇任何群組合併。")
+            if not ops_log:
+                st.warning("所有配對均選擇「保留兩欄」，未做任何變更。")
             else:
-                snapshot_before = clean_df.copy()
+                snap = clean_df.copy()
                 st.session_state["clean_df"] = df_work
-
-                cols_removed = [c for m in merged_log for c in m['merged_from']]
-                cols_added   = [m['new_col'] for m in merged_log]
-                _push_op("collinear_merge", cols_removed, cols_added, snapshot_before)
-
-                st.success(
-                    f"✅ 完成！合併 {len(merged_log)} 個群組，"
-                    f"移除 {len(cols_removed)} 欄 → 新增 {len(cols_added)} 欄（mean）"
-                )
-                for m in merged_log:
-                    st.caption(f"  `{m['new_col']}` ← {m['merged_from']}")
+                removed = [c for op in ops_log for c in op[1]]
+                added   = [c for op in ops_log for c in op[2]]
+                _push_op("vif_reduce", removed, added, snap)
+                st.success(f"✅ 完成！移除 {len(removed)} 欄，新增 {len(added)} 欄。")
                 st.rerun()
-
-    # ── 低於門檻群組（僅顯示，不合併）────────────────────────────────
-    if unmergeable:
-        with st.expander(
-            f"ℹ️ 低於門檻群組（|r| < {r_thr}，保留原特徵）— {len(unmergeable)} 組",
-            expanded=False
-        ):
-            for g in unmergeable:
-                st.markdown(f"- max |r| = **{g['max_r']:.3f}** | " +
-                            " / ".join([f"`{c[:50]}`" for c in g['cols']]))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
