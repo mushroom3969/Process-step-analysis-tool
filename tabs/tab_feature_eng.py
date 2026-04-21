@@ -228,7 +228,7 @@ def _render_collinearity_merge(show_mean: bool = True):
     mc3.metric("🚨 嚴重 (≥ {:.0f})".format(vif_high), n_high)
 
     st.dataframe(
-        vif_df.style.applymap(_vif_color, subset=['VIF']),
+        vif_df.style.map(_vif_color, subset=['VIF']),
         use_container_width=True, hide_index=True, height=300
     )
 
