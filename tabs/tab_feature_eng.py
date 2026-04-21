@@ -217,6 +217,14 @@ def _render_collinearity_merge(show_mean: bool = True):
 
     # ── 讀取已儲存的 VIF 結果 ─────────────────────────────────────
     vif_df = st.session_state.get("fe_vif_df")
+    if vif_df is not None:
+        # 若 clean_df 的欄位已改變（執行處理後），自動失效快取
+        current_cols = set(clean_df.columns)
+        cached_cols  = set(vif_df['Feature'].tolist())
+        if not cached_cols.issubset(current_cols):
+            st.session_state["fe_vif_df"]     = None
+            st.session_state["fe_pair_cache"] = None
+            vif_df = None
     if vif_df is None:
         st.info("點擊「🔍 執行共線性診斷」開始。")
         return
@@ -264,7 +272,8 @@ def _render_collinearity_merge(show_mean: bool = True):
     plt.tight_layout(); st.pyplot(fig); plt.close(fig)
 
     # ── 高 VIF 特徵的 Pairwise 分析 ──────────────────────────────────
-    high_vif_cols = vif_df.loc[vif_df['VIF'] >= vif_warn, 'Feature'].tolist()
+    high_vif_cols = [c for c in vif_df.loc[vif_df['VIF'] >= vif_warn, 'Feature'].tolist()
+                     if c in clean_df.columns]
 
     if not high_vif_cols:
         st.success("✅ 所有特徵 VIF 均低於警示門檻，無需處理。")
