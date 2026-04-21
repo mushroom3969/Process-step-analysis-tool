@@ -113,29 +113,57 @@ def _compute_vif(df: pd.DataFrame) -> pd.DataFrame:
     return vif_df.sort_values('VIF', ascending=False).reset_index(drop=True)
 
 
-def _high_vif_pairs(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
-    """計算指定欄位間的 pairwise Pearson |r|，回傳上三角配對表。"""
+def _high_vif_pairs(df: pd.DataFrame, cols: list[str],
+                    method: str = 'pearson') -> pd.DataFrame:
+    """
+    計算指定欄位間的 pairwise 相關係數絕對值，回傳上三角配對表。
+    method: 'pearson'（線性）或 'spearman'（單調非線性）
+    """
     sub = df[cols].fillna(df[cols].median())
-    corr = sub.corr(method='pearson').abs()
+    corr = sub.corr(method=method).abs()
+    col_label = '|r|' if method == 'pearson' else '|ρ|'
     rows = []
     for i in range(len(cols)):
         for j in range(i + 1, len(cols)):
             rows.append({
                 'Feature A': cols[i],
                 'Feature B': cols[j],
-                '|r|': round(float(corr.iloc[i, j]), 3),
+                col_label: round(float(corr.iloc[i, j]), 3),
             })
-    return pd.DataFrame(rows).sort_values('|r|', ascending=False).reset_index(drop=True)
+    return pd.DataFrame(rows).sort_values(col_label, ascending=False).reset_index(drop=True)
+
+
+def _compute_mi_pairs(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
+    """
+    計算指定欄位間的 pairwise Mutual Information（sklearn kNN 估計）。
+    MI 值單位為 nats，越大代表依賴性越強，0 = 完全獨立。
+    可偵測任意非線性關係（非單調亦可）。
+    """
+    from sklearn.feature_selection import mutual_info_regression
+    sub = df[cols].fillna(df[cols].median()).values
+    rows = []
+    n = len(cols)
+    for i in range(n):
+        for j in range(i + 1, n):
+            mi = mutual_info_regression(
+                sub[:, i].reshape(-1, 1), sub[:, j], random_state=42
+            )[0]
+            rows.append({'Feature A': cols[i], 'Feature B': cols[j],
+                         'MI': round(float(mi), 4)})
+    return pd.DataFrame(rows).sort_values('MI', ascending=False).reset_index(drop=True)
 
 
 def _render_collinearity_merge(show_mean: bool = True):
-    """Step 2.5 UI：VIF + Pairwise |r| 多重共線性診斷 & 處理"""
+    """Step 2.5 UI：VIF + Pairwise 相關 多重共線性診斷 & 處理"""
     st.markdown("---")
-    st.markdown("### 🔗 Step 2.5：多重共線性診斷（VIF + Pairwise |r|）")
+    st.markdown("### 🔗 Step 2.5：多重共線性診斷（VIF + Pairwise 相關）")
     st.caption(
-        "Step 1 已處理 Max/Min → mean+range、Before/After → diff、編號欄 → mean。"
-        "此步驟針對**剩餘特徵**計算 VIF 與 Pairwise |r|，"
-        "找出 Step 1 未涵蓋的殘餘共線性，可選擇合併（mean）或直接刪除。"
+        "Step 1 僅過濾無效欄位（關鍵字）。"
+        "此步驟針對**所有剩餘特徵**計算 VIF，找出 Max/Min、Before/After、編號欄等配對共線性，"
+        "再由您選擇合併（mean）、計算差值（diff）或直接刪除。\n\n"
+        "⚠️ **VIF 僅偵測線性共線性**。"
+        "勾選「Spearman |ρ|」可額外偵測**單調非線性**共線性（如指數、對數型關係）；"
+        "若需偵測複雜非線性（非單調），需另用 Mutual Information。"
     )
 
     clean_df = st.session_state.get("clean_df")
@@ -153,8 +181,25 @@ def _render_collinearity_merge(show_mean: bool = True):
                            help="VIF ≥ 此值 → 黃色警示")
     vif_high  = c2.slider("VIF 嚴重門檻", 5.0, 50.0, 10.0, 1.0, key="fe_vif_high",
                            help="VIF ≥ 此值 → 紅色嚴重")
-    r_thr     = c3.slider("配對 |r| 門檻", 0.5, 1.0, 0.85, 0.01, key="fe_r_thr",
-                           help="Pairwise |r| ≥ 此值 → 顯示為高度相關配對")
+    corr_method_sel = c3.selectbox(
+        "配對相關方法",
+        ["Pearson |r|（線性）", "Spearman |ρ|（單調非線性）", "Mutual Information（任意非線性）"],
+        key="fe_corr_method",
+        help="Pearson: 線性｜Spearman: 單調非線性｜MI: 任意非線性（含非單調）"
+    )
+
+    if "MI" in corr_method_sel:
+        corr_method, corr_label, corr_col = 'mi', 'MI (nats)', 'MI'
+        r_thr = st.slider("MI 門檻 (nats)", 0.0, 2.0, 0.1, 0.01, key="fe_r_thr",
+                          help="MI ≥ 此值 → 顯示為高依賴性配對；完全獨立時 MI ≈ 0")
+    elif "Spearman" in corr_method_sel:
+        corr_method, corr_label, corr_col = 'spearman', '|ρ| (Spearman)', '|ρ|'
+        r_thr = st.slider("配對 |ρ| 門檻", 0.5, 1.0, 0.85, 0.01, key="fe_r_thr",
+                          help="|ρ| ≥ 此值 → 顯示為高度相關配對")
+    else:
+        corr_method, corr_label, corr_col = 'pearson', '|r| (Pearson)', '|r|'
+        r_thr = st.slider("配對 |r| 門檻", 0.5, 1.0, 0.85, 0.01, key="fe_r_thr",
+                          help="|r| ≥ 此值 → 顯示為高度相關配對")
 
     if not st.button("🔍 執行共線性診斷", key="run_vif", type="primary"):
         st.info("點擊「🔍 執行共線性診斷」開始。")
@@ -212,20 +257,39 @@ def _render_collinearity_merge(show_mean: bool = True):
         st.success("✅ 所有特徵 VIF 均低於警示門檻，無需處理。")
         return
 
-    st.markdown(f"#### 🔍 高 VIF 特徵配對分析（|r| ≥ {r_thr}）")
-    pair_df = _high_vif_pairs(clean_df, high_vif_cols)
-    high_pairs = pair_df[pair_df['|r|'] >= r_thr].reset_index(drop=True)
+    st.markdown(f"#### 🔍 高 VIF 特徵配對分析（{corr_label} ≥ {r_thr}）")
+    if corr_method == 'mi':
+        if len(high_vif_cols) > 30:
+            st.warning(f"⚠️ 高 VIF 特徵共 {len(high_vif_cols)} 個，MI 計算可能較慢，建議先提高 VIF 門檻縮小範圍。")
+        with st.spinner(f"計算 Mutual Information（{len(high_vif_cols)} 個特徵）..."):
+            pair_df = _compute_mi_pairs(clean_df, high_vif_cols)
+    else:
+        pair_df = _high_vif_pairs(clean_df, high_vif_cols, method=corr_method)
+    high_pairs = pair_df[pair_df[corr_col] >= r_thr].reset_index(drop=True)
 
     if high_pairs.empty:
-        st.info(f"高 VIF 特徵間 pairwise |r| 均低於 {r_thr}，"
+        st.info(f"高 VIF 特徵間 pairwise {corr_label} 均低於 {r_thr}，"
                 "可能是多個特徵共同造成的多重共線性（非單一配對）。")
     else:
         st.dataframe(high_pairs, use_container_width=True, hide_index=True)
 
-        # 熱圖
-        if len(high_vif_cols) <= 25:
+        # 熱圖（MI 無固定上界，改用長條圖顯示）
+        if corr_method == 'mi':
+            top_pairs = high_pairs.head(20)
+            pair_labels = [
+                f"{r['Feature A'].split(':')[-1][:20]}↔{r['Feature B'].split(':')[-1][:20]}"
+                for _, r in top_pairs.iterrows()
+            ]
+            fig2, ax2 = plt.subplots(figsize=(10, max(4, len(top_pairs) * 0.4)))
+            ax2.barh(pair_labels, top_pairs['MI'], color='#9B59B6', alpha=0.8)
+            ax2.axvline(r_thr, color='red', lw=1.2, ls='--', label=f'門檻={r_thr}')
+            ax2.set_xlabel('Mutual Information (nats)')
+            ax2.set_title('Top 20 High-MI Pairs', fontsize=10)
+            ax2.invert_yaxis(); ax2.legend(fontsize=8); ax2.grid(axis='x', alpha=0.3)
+            plt.tight_layout(); st.pyplot(fig2); plt.close(fig2)
+        elif len(high_vif_cols) <= 25:
             sub = clean_df[high_vif_cols].fillna(clean_df[high_vif_cols].median())
-            corr_mat = sub.corr(method='pearson').abs()
+            corr_mat = sub.corr(method=corr_method).abs()
             short_names = {c: c.split(':')[-1][:35] for c in high_vif_cols}
             corr_mat.index   = [short_names[c] for c in high_vif_cols]
             corr_mat.columns = [short_names[c] for c in high_vif_cols]
@@ -234,7 +298,7 @@ def _render_collinearity_merge(show_mean: bool = True):
             sns.heatmap(corr_mat, annot=True, fmt='.2f', cmap='RdYlGn_r',
                         vmin=0, vmax=1, linewidths=0.4, ax=ax2,
                         annot_kws={'size': 7})
-            ax2.set_title('High-VIF Feature Pairwise |r|', fontsize=10)
+            ax2.set_title(f'High-VIF Feature Pairwise {corr_label}', fontsize=10)
             plt.xticks(rotation=35, ha='right', fontsize=7)
             plt.yticks(fontsize=7)
             plt.tight_layout(); st.pyplot(fig2); plt.close(fig2)
@@ -245,9 +309,10 @@ def _render_collinearity_merge(show_mean: bool = True):
 
         action_map = {}
         for idx, row in high_pairs.iterrows():
-            fa, fb, r_val = row['Feature A'], row['Feature B'], row['|r|']
+            fa, fb = row['Feature A'], row['Feature B']
+            r_val = row[corr_col]
             with st.expander(
-                f"|r| = {r_val:.3f}  |  `{fa.split(':')[-1][:45]}` ↔ `{fb.split(':')[-1][:45]}`",
+                f"{corr_col} = {r_val:.3f}  |  `{fa.split(':')[-1][:45]}` ↔ `{fb.split(':')[-1][:45]}`",
                 expanded=(idx < 3)
             ):
                 act = st.radio(
