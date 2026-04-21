@@ -228,8 +228,7 @@ def _render_collinearity_merge(show_mean: bool = True):
         current_cols = set(clean_df.columns)
         cached_cols  = set(vif_df['Feature'].tolist())
         if not cached_cols.issubset(current_cols):
-            st.session_state["fe_vif_df"]     = None
-            st.session_state["fe_pair_cache"] = None
+            st.session_state["fe_vif_df"] = None
             vif_df = None
     if vif_df is None:
         st.info("點擊「🔍 執行共線性診斷」開始。")
@@ -312,7 +311,7 @@ def _render_collinearity_merge(show_mean: bool = True):
                 st.error(f"配對相關計算失敗：{e}")
                 return
         st.session_state["fe_pair_cache"] = {"key": cache_key, "df": pair_df}
-        st.rerun()
+        # 不呼叫 st.rerun()，直接往下 render 結果
 
     if pair_df is None:
         st.info("點擊上方按鈕計算配對相關。")
