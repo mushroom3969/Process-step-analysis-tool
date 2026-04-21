@@ -162,8 +162,7 @@ def _render_collinearity_merge(show_mean: bool = True):
         "此步驟針對**所有剩餘特徵**計算 VIF，找出 Max/Min、Before/After、編號欄等配對共線性，"
         "再由您選擇合併（mean）、計算差值（diff）或直接刪除。\n\n"
         "⚠️ **VIF 僅偵測線性共線性**。"
-        "勾選「Spearman |ρ|」可額外偵測**單調非線性**共線性（如指數、對數型關係）；"
-        "若需偵測複雜非線性（非單調），需另用 Mutual Information。"
+        "Spearman 可偵測**單調非線性**；MI 可偵測**任意非線性（含非單調）**。"
     )
 
     clean_df = st.session_state.get("clean_df")
@@ -176,6 +175,7 @@ def _render_collinearity_merge(show_mean: bool = True):
         st.info("數值特徵不足 2 欄，無法計算 VIF。")
         return
 
+    # ── 參數設定 ──────────────────────────────────────────────────
     c1, c2, c3 = st.columns(3)
     vif_warn  = c1.slider("VIF 警示門檻", 2.0, 20.0, 5.0,  0.5, key="fe_vif_warn",
                            help="VIF ≥ 此值 → 黃色警示")
@@ -201,12 +201,25 @@ def _render_collinearity_merge(show_mean: bool = True):
         r_thr = st.slider("配對 |r| 門檻", 0.5, 1.0, 0.85, 0.01, key="fe_r_thr",
                           help="|r| ≥ 此值 → 顯示為高度相關配對")
 
-    if not st.button("🔍 執行共線性診斷", key="run_vif", type="primary"):
+    # ── 執行 / 清除按鈕 ───────────────────────────────────────────
+    btn_col1, btn_col2 = st.columns([2, 1])
+    if btn_col1.button("🔍 執行共線性診斷", key="run_vif", type="primary"):
+        with st.spinner(f"計算 {len(num_cols)} 個特徵的 VIF..."):
+            vif_df = _compute_vif(clean_df)
+        st.session_state["fe_vif_df"]     = vif_df
+        st.session_state["fe_pair_cache"] = None   # 清除舊配對快取
+        st.rerun()
+
+    if btn_col2.button("🔄 清除診斷結果", key="clear_vif"):
+        st.session_state["fe_vif_df"]     = None
+        st.session_state["fe_pair_cache"] = None
+        st.rerun()
+
+    # ── 讀取已儲存的 VIF 結果 ─────────────────────────────────────
+    vif_df = st.session_state.get("fe_vif_df")
+    if vif_df is None:
         st.info("點擊「🔍 執行共線性診斷」開始。")
         return
-
-    with st.spinner(f"計算 {len(num_cols)} 個特徵的 VIF..."):
-        vif_df = _compute_vif(clean_df)
 
     # ── VIF 總覽表 ──────────────────────────────────────────────────
     st.markdown("#### 📋 VIF 總覽")
@@ -250,117 +263,131 @@ def _render_collinearity_merge(show_mean: bool = True):
     ax.legend(fontsize=8); ax.grid(axis='x', alpha=0.3)
     plt.tight_layout(); st.pyplot(fig); plt.close(fig)
 
-    # ── 高 VIF 特徵的 Pairwise |r| ──────────────────────────────────
+    # ── 高 VIF 特徵的 Pairwise 分析 ──────────────────────────────────
     high_vif_cols = vif_df.loc[vif_df['VIF'] >= vif_warn, 'Feature'].tolist()
 
     if not high_vif_cols:
         st.success("✅ 所有特徵 VIF 均低於警示門檻，無需處理。")
         return
 
-    st.markdown(f"#### 🔍 高 VIF 特徵配對分析（{corr_label} ≥ {r_thr}）")
-    if corr_method == 'mi':
-        if len(high_vif_cols) > 30:
-            st.warning(f"⚠️ 高 VIF 特徵共 {len(high_vif_cols)} 個，MI 計算可能較慢，建議先提高 VIF 門檻縮小範圍。")
-        with st.spinner(f"計算 Mutual Information（{len(high_vif_cols)} 個特徵）..."):
-            pair_df = _compute_mi_pairs(clean_df, high_vif_cols)
+    # 配對結果快取（避免每次 rerun 重算，特別是 MI 很慢）
+    pair_cache = st.session_state.get("fe_pair_cache")
+    cache_key  = f"{corr_method}_{r_thr}_{','.join(sorted(high_vif_cols))}"
+    if pair_cache is None or pair_cache.get("key") != cache_key:
+        if corr_method == 'mi':
+            if len(high_vif_cols) > 30:
+                st.warning(f"⚠️ 高 VIF 特徵共 {len(high_vif_cols)} 個，MI 計算可能較慢。")
+            with st.spinner(f"計算 Mutual Information（{len(high_vif_cols)} 個特徵）..."):
+                pair_df = _compute_mi_pairs(clean_df, high_vif_cols)
+        else:
+            pair_df = _high_vif_pairs(clean_df, high_vif_cols, method=corr_method)
+        st.session_state["fe_pair_cache"] = {"key": cache_key, "df": pair_df}
     else:
-        pair_df = _high_vif_pairs(clean_df, high_vif_cols, method=corr_method)
+        pair_df = pair_cache["df"]
+
     high_pairs = pair_df[pair_df[corr_col] >= r_thr].reset_index(drop=True)
 
+    st.markdown(f"#### 🔍 高 VIF 特徵配對分析（{corr_label} ≥ {r_thr}）")
     if high_pairs.empty:
         st.info(f"高 VIF 特徵間 pairwise {corr_label} 均低於 {r_thr}，"
                 "可能是多個特徵共同造成的多重共線性（非單一配對）。")
-    else:
-        st.dataframe(high_pairs, use_container_width=True, hide_index=True)
+        return
 
-        # 熱圖（MI 無固定上界，改用長條圖顯示）
-        if corr_method == 'mi':
-            top_pairs = high_pairs.head(20)
-            pair_labels = [
-                f"{r['Feature A'].split(':')[-1][:20]}↔{r['Feature B'].split(':')[-1][:20]}"
-                for _, r in top_pairs.iterrows()
-            ]
-            fig2, ax2 = plt.subplots(figsize=(10, max(4, len(top_pairs) * 0.4)))
-            ax2.barh(pair_labels, top_pairs['MI'], color='#9B59B6', alpha=0.8)
-            ax2.axvline(r_thr, color='red', lw=1.2, ls='--', label=f'門檻={r_thr}')
-            ax2.set_xlabel('Mutual Information (nats)')
-            ax2.set_title('Top 20 High-MI Pairs', fontsize=10)
-            ax2.invert_yaxis(); ax2.legend(fontsize=8); ax2.grid(axis='x', alpha=0.3)
-            plt.tight_layout(); st.pyplot(fig2); plt.close(fig2)
-        elif len(high_vif_cols) <= 25:
-            sub = clean_df[high_vif_cols].fillna(clean_df[high_vif_cols].median())
-            corr_mat = sub.corr(method=corr_method).abs()
-            short_names = {c: c.split(':')[-1][:35] for c in high_vif_cols}
-            corr_mat.index   = [short_names[c] for c in high_vif_cols]
-            corr_mat.columns = [short_names[c] for c in high_vif_cols]
-            sz = max(6, len(high_vif_cols) * 0.55)
-            fig2, ax2 = plt.subplots(figsize=(sz, sz))
-            sns.heatmap(corr_mat, annot=True, fmt='.2f', cmap='RdYlGn_r',
-                        vmin=0, vmax=1, linewidths=0.4, ax=ax2,
-                        annot_kws={'size': 7})
-            ax2.set_title(f'High-VIF Feature Pairwise {corr_label}', fontsize=10)
-            plt.xticks(rotation=35, ha='right', fontsize=7)
-            plt.yticks(fontsize=7)
-            plt.tight_layout(); st.pyplot(fig2); plt.close(fig2)
+    st.dataframe(high_pairs, use_container_width=True, hide_index=True)
 
-        # ── 處理選項 ────────────────────────────────────────────────
-        st.markdown("#### ⚡ 處理高度相關配對")
-        st.caption("對每個高度相關配對選擇處理方式：合併為 mean、刪除其中一欄、或保留。")
+    # 視覺化
+    if corr_method == 'mi':
+        top_pairs = high_pairs.head(20)
+        pair_labels = [
+            f"{r['Feature A'].split(':')[-1][:20]}↔{r['Feature B'].split(':')[-1][:20]}"
+            for _, r in top_pairs.iterrows()
+        ]
+        fig2, ax2 = plt.subplots(figsize=(10, max(4, len(top_pairs) * 0.4)))
+        ax2.barh(pair_labels, top_pairs['MI'], color='#9B59B6', alpha=0.8)
+        ax2.axvline(r_thr, color='red', lw=1.2, ls='--', label=f'門檻={r_thr}')
+        ax2.set_xlabel('Mutual Information (nats)')
+        ax2.set_title('Top 20 High-MI Pairs', fontsize=10)
+        ax2.invert_yaxis(); ax2.legend(fontsize=8); ax2.grid(axis='x', alpha=0.3)
+        plt.tight_layout(); st.pyplot(fig2); plt.close(fig2)
+    elif len(high_vif_cols) <= 25:
+        sub = clean_df[high_vif_cols].fillna(clean_df[high_vif_cols].median())
+        corr_mat = sub.corr(method=corr_method).abs()
+        short_names = {c: c.split(':')[-1][:35] for c in high_vif_cols}
+        corr_mat.index   = [short_names[c] for c in high_vif_cols]
+        corr_mat.columns = [short_names[c] for c in high_vif_cols]
+        sz = max(6, len(high_vif_cols) * 0.55)
+        fig2, ax2 = plt.subplots(figsize=(sz, sz))
+        sns.heatmap(corr_mat, annot=True, fmt='.2f', cmap='RdYlGn_r',
+                    vmin=0, vmax=1, linewidths=0.4, ax=ax2, annot_kws={'size': 7})
+        ax2.set_title(f'High-VIF Feature Pairwise {corr_label}', fontsize=10)
+        plt.xticks(rotation=35, ha='right', fontsize=7)
+        plt.yticks(fontsize=7)
+        plt.tight_layout(); st.pyplot(fig2); plt.close(fig2)
 
-        action_map = {}
-        for idx, row in high_pairs.iterrows():
-            fa, fb = row['Feature A'], row['Feature B']
-            r_val = row[corr_col]
-            with st.expander(
-                f"{corr_col} = {r_val:.3f}  |  `{fa.split(':')[-1][:45]}` ↔ `{fb.split(':')[-1][:45]}`",
-                expanded=(idx < 3)
-            ):
-                act = st.radio(
-                    "處理方式",
-                    ["保留兩欄", f"合併為 mean → 新欄", f"刪除 A", f"刪除 B"],
-                    key=f"fe_act_{idx}", horizontal=True
-                )
-                new_name = ""
-                if "合併" in act:
-                    new_name = st.text_input(
-                        "新欄位名稱",
-                        value=f"{fa.split(':')[-1][:30]}_mean",
-                        key=f"fe_mname_{idx}"
-                    )
-                action_map[idx] = {'fa': fa, 'fb': fb, 'act': act, 'new_name': new_name}
+    # ── 處理選項（data_editor：在表格內選擇，不觸發 rerun 問題）──
+    st.markdown("#### ⚡ 處理高度相關配對")
+    st.caption("在表格的「處理方式」欄位直接選擇動作，合併時在「新欄位名稱」填寫名稱，全部選完後點「⚡ 執行處理」。")
 
-        if st.button("⚡ 執行處理", key="fe_vif_exec", type="primary"):
-            df_work = clean_df.copy()
-            ops_log = []
+    edit_df = high_pairs[[c for c in ['Feature A', 'Feature B', corr_col] if c in high_pairs.columns]].copy()
+    edit_df['處理方式'] = '保留兩欄'
+    edit_df['新欄位名稱'] = [
+        f"{str(fa).split(':')[-1][:25]}_mean" for fa in edit_df['Feature A']
+    ]
 
-            for idx, info in action_map.items():
-                fa, fb = info['fa'], info['fb']
-                act = info['act']
-                if '保留' in act:
-                    continue
-                if '合併' in act:
-                    nn = info['new_name'].strip() or f"{fa[:20]}_mean"
-                    if fa in df_work and fb in df_work:
-                        df_work[nn] = df_work[[fa, fb]].mean(axis=1)
-                        df_work.drop(columns=[fa, fb], inplace=True, errors='ignore')
-                        ops_log.append(('merge', [fa, fb], [nn]))
-                elif '刪除 A' in act and fa in df_work:
-                    df_work.drop(columns=[fa], inplace=True, errors='ignore')
-                    ops_log.append(('drop', [fa], []))
-                elif '刪除 B' in act and fb in df_work:
-                    df_work.drop(columns=[fb], inplace=True, errors='ignore')
-                    ops_log.append(('drop', [fb], []))
+    edited_df = st.data_editor(
+        edit_df,
+        column_config={
+            'Feature A':  st.column_config.TextColumn('Feature A',  disabled=True),
+            'Feature B':  st.column_config.TextColumn('Feature B',  disabled=True),
+            corr_col:     st.column_config.NumberColumn(corr_col,   disabled=True, format='%.3f'),
+            '處理方式':   st.column_config.SelectboxColumn(
+                              '處理方式',
+                              options=['保留兩欄', '合併為 mean', '刪除 A', '刪除 B'],
+                              required=True,
+                          ),
+            '新欄位名稱': st.column_config.TextColumn('新欄位名稱（合併時填寫）'),
+        },
+        use_container_width=True,
+        hide_index=True,
+        num_rows='fixed',
+        key=f"fe_pair_editor_{cache_key[:12]}",
+    )
 
-            if not ops_log:
-                st.warning("所有配對均選擇「保留兩欄」，未做任何變更。")
-            else:
-                snap = clean_df.copy()
-                st.session_state["clean_df"] = df_work
-                removed = [c for op in ops_log for c in op[1]]
-                added   = [c for op in ops_log for c in op[2]]
-                _push_op("vif_reduce", removed, added, snap)
-                st.success(f"✅ 完成！移除 {len(removed)} 欄，新增 {len(added)} 欄。")
-                st.rerun()
+    if st.button("⚡ 執行處理", key="fe_vif_exec", type="primary"):
+        df_work = clean_df.copy()
+        ops_log = []
+
+        for _, row in edited_df.iterrows():
+            fa  = row['Feature A']
+            fb  = row['Feature B']
+            act = row['處理方式']
+            if '保留' in act:
+                continue
+            if '合併' in act:
+                nn = str(row.get('新欄位名稱', '')).strip() or f"{str(fa)[:20]}_mean"
+                if fa in df_work.columns and fb in df_work.columns:
+                    df_work[nn] = df_work[[fa, fb]].mean(axis=1)
+                    df_work.drop(columns=[fa, fb], inplace=True, errors='ignore')
+                    ops_log.append(('merge', [fa, fb], [nn]))
+            elif '刪除 A' in act and fa in df_work.columns:
+                df_work.drop(columns=[fa], inplace=True, errors='ignore')
+                ops_log.append(('drop', [fa], []))
+            elif '刪除 B' in act and fb in df_work.columns:
+                df_work.drop(columns=[fb], inplace=True, errors='ignore')
+                ops_log.append(('drop', [fb], []))
+
+        if not ops_log:
+            st.warning("所有配對均選擇「保留兩欄」，未做任何變更。")
+        else:
+            snap = clean_df.copy()
+            st.session_state["clean_df"]      = df_work
+            st.session_state["fe_vif_df"]     = None   # 執行後清除診斷結果
+            st.session_state["fe_pair_cache"] = None
+            removed = [c for op in ops_log for c in op[1]]
+            added   = [c for op in ops_log for c in op[2]]
+            _push_op("vif_reduce", removed, added, snap)
+            st.success(f"✅ 完成！移除 {len(removed)} 欄，新增 {len(added)} 欄。")
+            st.rerun()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -374,10 +401,11 @@ def _init_fe_state():
         "clean_df":            None,
         "fe_op_log":           [],
         "fe_stat_dropped":     {},
-        # BUG FIX: store stat filter results separately so rerun doesn't re-trigger
         "fe_stat_result":      None,
         "fe_auto_result":      None,
         "df_before_step2":     None,
+        "fe_vif_df":           None,   # VIF 診斷結果快取
+        "fe_pair_cache":       None,   # 配對相關快取
     }
     for k, v in defaults.items():
         if k not in st.session_state:
