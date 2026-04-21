@@ -285,45 +285,53 @@ def _render_collinearity_merge(show_mean: bool = True):
         st.success("✅ 所有特徵 VIF 均低於警示門檻，無需處理。")
         return
 
-    # 配對結果快取（避免每次 rerun 重算，特別是 MI 很慢）
+    # 配對結果快取（key 不含 r_thr，使得切門檻不需重算）
     pair_cache = st.session_state.get("fe_pair_cache")
-    cache_key  = f"{corr_method}_{r_thr}_{','.join(sorted(high_vif_cols))}"
+    cache_key  = f"{corr_method}_{','.join(sorted(high_vif_cols))}"
     if pair_cache is None or pair_cache.get("key") != cache_key:
         if corr_method == 'mi':
             if len(high_vif_cols) > 30:
                 st.warning(f"⚠️ 高 VIF 特徵共 {len(high_vif_cols)} 個，MI 計算可能較慢。")
-            with st.spinner(f"計算 Mutual Information（{len(high_vif_cols)} 個特徵）..."):
-                pair_df = _compute_mi_pairs(clean_df, high_vif_cols)
+            try:
+                with st.spinner(f"計算 Mutual Information（{len(high_vif_cols)} 個特徵）..."):
+                    pair_df = _compute_mi_pairs(clean_df, high_vif_cols)
+            except Exception as e:
+                st.error(f"MI 計算失敗：{e}")
+                return
         else:
-            pair_df = _high_vif_pairs(clean_df, high_vif_cols, method=corr_method)
+            try:
+                pair_df = _high_vif_pairs(clean_df, high_vif_cols, method=corr_method)
+            except Exception as e:
+                st.error(f"配對相關計算失敗：{e}")
+                return
         st.session_state["fe_pair_cache"] = {"key": cache_key, "df": pair_df}
     else:
         pair_df = pair_cache["df"]
 
-    high_pairs = pair_df[pair_df[corr_col] >= r_thr].reset_index(drop=True)
+    st.markdown(f"#### 🔍 高 VIF 特徵配對分析")
 
-    st.markdown(f"#### 🔍 高 VIF 特徵配對分析（{corr_label} ≥ {r_thr}）")
-    if high_pairs.empty:
-        st.info(f"高 VIF 特徵間 pairwise {corr_label} 均低於 {r_thr}，"
-                "可能是多個特徵共同造成的多重共線性（非單一配對）。")
+    # 始終顯示完整配對表（讓使用者看到所有 score，再用門檻篩選行動區）
+    if pair_df.empty:
+        st.info("高 VIF 特徵數不足，無法計算配對相關。")
         return
 
-    st.dataframe(high_pairs, use_container_width=True, hide_index=True)
-
-    # 視覺化
+    # MI：Top-20 長條圖（顯示全部 score，門檻線標示）
     if corr_method == 'mi':
-        top_pairs = high_pairs.head(20)
+        top_all = pair_df.head(20)
         pair_labels = [
             f"{r['Feature A'].split(':')[-1][:20]}↔{r['Feature B'].split(':')[-1][:20]}"
-            for _, r in top_pairs.iterrows()
+            for _, r in top_all.iterrows()
         ]
-        fig2, ax2 = plt.subplots(figsize=(10, max(4, len(top_pairs) * 0.4)))
-        ax2.barh(pair_labels, top_pairs['MI'], color='#9B59B6', alpha=0.8)
-        ax2.axvline(r_thr, color='red', lw=1.2, ls='--', label=f'門檻={r_thr}')
+        fig2, ax2 = plt.subplots(figsize=(10, max(4, len(top_all) * 0.4)))
+        colors = ['#9B59B6' if v >= r_thr else '#CCCCCC' for v in top_all['MI']]
+        ax2.barh(pair_labels, top_all['MI'], color=colors, alpha=0.85)
+        ax2.axvline(r_thr, color='red', lw=1.5, ls='--', label=f'門檻={r_thr}')
         ax2.set_xlabel('Mutual Information (nats)')
-        ax2.set_title('Top 20 High-MI Pairs', fontsize=10)
+        ax2.set_title('Top 20 MI Pairs（紫色 ≥ 門檻）', fontsize=10)
         ax2.invert_yaxis(); ax2.legend(fontsize=8); ax2.grid(axis='x', alpha=0.3)
         plt.tight_layout(); st.pyplot(fig2); plt.close(fig2)
+        st.caption(f"共計算 {len(pair_df)} 個配對，最大 MI = {pair_df['MI'].max():.4f}，門檻 = {r_thr}")
+
     elif len(high_vif_cols) <= 25:
         sub = clean_df[high_vif_cols].fillna(clean_df[high_vif_cols].median())
         corr_mat = sub.corr(method=corr_method).abs()
@@ -339,10 +347,15 @@ def _render_collinearity_merge(show_mean: bool = True):
         plt.yticks(fontsize=7)
         plt.tight_layout(); st.pyplot(fig2); plt.close(fig2)
 
-    # ── 處理選項（data_editor：在表格內選擇，不觸發 rerun 問題）──
+    # ── 處理選項（data_editor）──────────────────────────────────
+    high_pairs = pair_df[pair_df[corr_col] >= r_thr].reset_index(drop=True)
     st.markdown("#### ⚡ 處理高度相關配對")
-    st.caption("在表格的「處理方式」欄位直接選擇動作，合併時在「新欄位名稱」填寫名稱，全部選完後點「⚡ 執行處理」。")
 
+    if high_pairs.empty:
+        st.info(f"目前門檻 {r_thr} 下無配對超過門檻，請降低門檻或查看上方長條圖確認分佈。")
+        return
+
+    st.caption(f"共 {len(high_pairs)} 個配對 ≥ {r_thr}。在表格選擇動作，全部選完後點「⚡ 執行處理」。")
     edit_df = high_pairs[[c for c in ['Feature A', 'Feature B', corr_col] if c in high_pairs.columns]].copy()
     edit_df['處理方式'] = '保留兩欄'
     edit_df['新欄位名稱'] = [
