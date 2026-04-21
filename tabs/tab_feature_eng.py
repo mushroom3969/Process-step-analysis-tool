@@ -130,7 +130,10 @@ def _high_vif_pairs(df: pd.DataFrame, cols: list[str],
                 'Feature B': cols[j],
                 col_label: round(float(corr.iloc[i, j]), 3),
             })
-    return pd.DataFrame(rows).sort_values(col_label, ascending=False).reset_index(drop=True)
+    df_rows = pd.DataFrame(rows)
+    if df_rows.empty:
+        return pd.DataFrame(columns=['Feature A', 'Feature B', col_label])
+    return df_rows.sort_values(col_label, ascending=False).reset_index(drop=True)
 
 
 def _compute_mi_pairs(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
@@ -150,7 +153,10 @@ def _compute_mi_pairs(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
             )[0]
             rows.append({'Feature A': cols[i], 'Feature B': cols[j],
                          'MI': round(float(mi), 4)})
-    return pd.DataFrame(rows).sort_values('MI', ascending=False).reset_index(drop=True)
+    df_mi = pd.DataFrame(rows)
+    if df_mi.empty:
+        return pd.DataFrame(columns=['Feature A', 'Feature B', 'MI'])
+    return df_mi.sort_values('MI', ascending=False).reset_index(drop=True)
 
 
 def _render_collinearity_merge(show_mean: bool = True):
@@ -190,15 +196,15 @@ def _render_collinearity_merge(show_mean: bool = True):
 
     if "MI" in corr_method_sel:
         corr_method, corr_label, corr_col = 'mi', 'MI (nats)', 'MI'
-        r_thr = st.slider("MI 門檻 (nats)", 0.0, 2.0, 0.1, 0.01, key="fe_r_thr",
+        r_thr = st.slider("MI 門檻 (nats)", 0.0, 2.0, 0.1, 0.01, key="fe_r_thr_mi",
                           help="MI ≥ 此值 → 顯示為高依賴性配對；完全獨立時 MI ≈ 0")
     elif "Spearman" in corr_method_sel:
         corr_method, corr_label, corr_col = 'spearman', '|ρ| (Spearman)', '|ρ|'
-        r_thr = st.slider("配對 |ρ| 門檻", 0.5, 1.0, 0.85, 0.01, key="fe_r_thr",
+        r_thr = st.slider("配對 |ρ| 門檻", 0.5, 1.0, 0.85, 0.01, key="fe_r_thr_sp",
                           help="|ρ| ≥ 此值 → 顯示為高度相關配對")
     else:
         corr_method, corr_label, corr_col = 'pearson', '|r| (Pearson)', '|r|'
-        r_thr = st.slider("配對 |r| 門檻", 0.5, 1.0, 0.85, 0.01, key="fe_r_thr",
+        r_thr = st.slider("配對 |r| 門檻", 0.5, 1.0, 0.85, 0.01, key="fe_r_thr_pe",
                           help="|r| ≥ 此值 → 顯示為高度相關配對")
 
     # ── 執行 / 清除按鈕 ───────────────────────────────────────────
