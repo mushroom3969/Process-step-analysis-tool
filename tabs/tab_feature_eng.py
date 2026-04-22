@@ -970,7 +970,7 @@ def _render_main(selected_process_df, show_mean: bool = True):
                     st.dataframe(reasons, use_container_width=True, hide_index=True)
 
             _render_changed_cols(
-                df_before=stat_res["snapshot"], =stat_res["filtered_df"],
+                df_before=stat_res["snapshot"], df_after=stat_res["filtered_df"],
                 cols_removed=stat_res["removed"], cols_added=[],
                 source_df_for_removed=stat_res["snapshot"],
                 section_title="Step 2 變更詳情", show_mean=show_mean
