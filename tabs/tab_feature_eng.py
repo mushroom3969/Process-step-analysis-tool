@@ -113,6 +113,83 @@ def _compute_vif(df: pd.DataFrame) -> pd.DataFrame:
     return vif_df.sort_values('VIF', ascending=False).reset_index(drop=True)
 
 
+def _iterative_vif_elimination(
+    df: pd.DataFrame,
+    vif_threshold: float = 5.0,
+    max_iter: int = 20,
+    protected_cols: list = None,
+) -> tuple:
+    """
+    迭代 VIF 剔除：每輪從可刪除特徵中移除 VIF 最高者，重新計算，
+    直到所有可刪除特徵 VIF ≤ threshold，或達到 max_iter 輪次。
+    回傳 (處理後 DataFrame, 剔除記錄 list[dict])
+    """
+    from sklearn.linear_model import LinearRegression
+    if protected_cols is None:
+        protected_cols = []
+    protected_set = set(protected_cols)
+    df_work = df.copy()
+    log = []
+
+    for iteration in range(1, max_iter + 1):
+        num_cols = [c for c in df_work.select_dtypes(include='number').columns
+                    if c.lower() != 'batchid']
+        eligible = [c for c in num_cols if c not in protected_set]
+
+        if len(num_cols) < 2 or not eligible:
+            break
+
+        X = df_work[num_cols].copy()
+        X = X.fillna(X.median())
+
+        # 計算保護欄外的每個可刪除特徵之 VIF（保護欄仍參與迴歸）
+        vif_eligible = {}
+        for col in eligible:
+            y = X[col].values
+            others = X.drop(columns=[col]).values
+            if others.shape[1] == 0:
+                continue
+            r2 = LinearRegression().fit(others, y).score(others, y)
+            vif_eligible[col] = 1.0 / (1.0 - r2) if r2 < 1.0 else np.inf
+
+        if not vif_eligible:
+            break
+
+        max_vif_val = max(vif_eligible.values())
+        max_vif_col = max(vif_eligible, key=vif_eligible.get)
+
+        if max_vif_val <= vif_threshold:
+            log.append({
+                '輪次': f'第 {iteration} 輪',
+                '動作': '✅ 收斂',
+                '移除特徵': '—',
+                '該輪最高 VIF': f'{max_vif_val:.2f}',
+                '剩餘特徵數': len(num_cols),
+            })
+            break
+
+        log.append({
+            '輪次': f'第 {iteration} 輪',
+            '動作': '刪除',
+            '移除特徵': max_vif_col.split(':')[-1][:60],
+            '該輪最高 VIF': f'{max_vif_val:.2f}',
+            '剩餘特徵數': len(num_cols) - 1,
+        })
+        df_work = df_work.drop(columns=[max_vif_col])
+    else:
+        num_remaining = len([c for c in df_work.select_dtypes(include='number').columns
+                             if c.lower() != 'batchid'])
+        log.append({
+            '輪次': f'第 {max_iter} 輪（達上限）',
+            '動作': '⚠️ 未收斂',
+            '移除特徵': '—',
+            '該輪最高 VIF': '—',
+            '剩餘特徵數': num_remaining,
+        })
+
+    return df_work, log
+
+
 def _high_vif_pairs(df: pd.DataFrame, cols: list[str],
                     method: str = 'pearson') -> pd.DataFrame:
     """
@@ -159,6 +236,110 @@ def _compute_mi_pairs(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
     return df_mi.sort_values('MI', ascending=False).reset_index(drop=True)
 
 
+def _render_auto_vif(clean_df: pd.DataFrame, num_cols: list):
+    """自動迭代 VIF 剔除 UI（在 _render_collinearity_merge 中以模式切換呼叫）"""
+    st.caption(
+        "每輪自動移除 VIF 最高的特徵（可刪除範圍內），重新計算，"
+        "直到所有特徵 VIF ≤ 門檻或達到最大輪次。\n\n"
+        "適合需要快速篩選大量特徵的情境；保護欄位不會被刪除，但仍參與 VIF 計算。"
+    )
+
+    a1, a2 = st.columns(2)
+    auto_thr = a1.slider(
+        "VIF 剔除門檻", 2.0, 20.0, 5.0, 0.5, key="fe_auto_thr",
+        help="高於此值的特徵（由高到低）逐輪被移除",
+    )
+    auto_max_iter = a2.number_input(
+        "最大迭代輪次", 1, 100, 20, step=1, key="fe_auto_max",
+        help="超過此輪次即使未收斂也停止",
+    )
+
+    protected = st.multiselect(
+        "保護欄位（不允許被自動刪除）",
+        options=num_cols,
+        key="fe_auto_protected",
+        help="選擇不希望被自動剔除的特徵；它們仍會參與其他欄位的 VIF 計算",
+    )
+
+    btn_c1, btn_c2 = st.columns([2, 1])
+    run_auto = btn_c1.button("🤖 執行迭代自動剔除", key="fe_auto_run", type="primary")
+    if btn_c2.button("🔄 清除結果", key="fe_auto_clear"):
+        st.session_state["fe_auto_result"] = None
+        st.session_state["fe_auto_log"]    = None
+        st.rerun()
+
+    if run_auto:
+        with st.spinner(f"正在迭代 VIF 剔除（門檻={auto_thr}，最大 {auto_max_iter} 輪）..."):
+            df_result, elim_log = _iterative_vif_elimination(
+                clean_df, float(auto_thr), int(auto_max_iter), protected
+            )
+        st.session_state["fe_auto_result"] = df_result
+        st.session_state["fe_auto_log"]    = elim_log
+        st.rerun()
+
+    auto_result = st.session_state.get("fe_auto_result")
+    auto_log    = st.session_state.get("fe_auto_log")
+
+    if auto_result is None or auto_log is None:
+        st.info("設定參數後，點擊「🤖 執行迭代自動剔除」開始。")
+        return
+
+    # ── 統計摘要 ──────────────────────────────────────────────
+    before_n   = len(num_cols)
+    after_cols = [c for c in auto_result.select_dtypes(include='number').columns
+                  if c.lower() != 'batchid']
+    after_n    = len(after_cols)
+    removed_n  = before_n - after_n
+
+    rm1, rm2, rm3 = st.columns(3)
+    rm1.metric("原始特徵數", before_n)
+    rm2.metric("移除特徵數", removed_n, delta=f"-{removed_n}", delta_color="inverse")
+    rm3.metric("保留特徵數", after_n)
+
+    # ── 逐輪剔除記錄 ──────────────────────────────────────────
+    st.markdown("#### 📋 逐輪剔除記錄")
+    st.dataframe(pd.DataFrame(auto_log), use_container_width=True, hide_index=True)
+
+    # ── 移除欄位清單 ──────────────────────────────────────────
+    removed_cols = [c for c in num_cols if c not in set(after_cols)]
+    if removed_cols:
+        with st.expander(f"🗑️ 已移除欄位清單（共 {len(removed_cols)} 欄）"):
+            st.dataframe(
+                pd.DataFrame({"移除特徵": removed_cols}),
+                use_container_width=True, hide_index=True,
+            )
+
+    # ── 剩餘特徵最終 VIF ──────────────────────────────────────
+    st.markdown("#### 📊 剩餘特徵最終 VIF")
+    with st.spinner("計算剩餘特徵 VIF..."):
+        final_vif = _compute_vif(auto_result)
+
+    def _auto_color(val):
+        if not isinstance(val, (int, float)) or np.isnan(val):
+            return ''
+        if val >= 10: return 'background-color:#FFCCCC'
+        if val >= 5:  return 'background-color:#FFF3CC'
+        return 'background-color:#CCFFCC'
+
+    st.dataframe(
+        final_vif.style.map(_auto_color, subset=['VIF']),
+        use_container_width=True, hide_index=True, height=250,
+    )
+
+    # ── 套用按鈕 ──────────────────────────────────────────────
+    st.markdown("---")
+    if st.button("✅ 套用結果至資料集", key="fe_auto_apply", type="primary"):
+        snap         = clean_df.copy()
+        all_removed  = [c for c in clean_df.columns if c not in auto_result.columns]
+        _push_op("vif_reduce", all_removed, [], snap)
+        st.session_state["clean_df"]       = auto_result
+        st.session_state["fe_vif_df"]      = None
+        st.session_state["fe_auto_result"] = None
+        st.session_state["fe_auto_log"]    = None
+        st.success(f"✅ 已套用！共移除 {len(all_removed)} 個特徵。")
+        st.rerun()
+
+
 def _render_collinearity_merge(show_mean: bool = True):
     """Step 2.5 UI：VIF + Pairwise 相關 多重共線性診斷 & 處理"""
     st.markdown("---")
@@ -181,6 +362,19 @@ def _render_collinearity_merge(show_mean: bool = True):
         st.info("數值特徵不足 2 欄，無法計算 VIF。")
         return
 
+    # ── 模式切換 ──────────────────────────────────────────────────
+    mode = st.radio(
+        "診斷模式",
+        ["🔍 手動配對診斷", "🤖 迭代自動剔除"],
+        horizontal=True,
+        key="fe_vif_mode",
+        help="手動：查看 VIF 總覽並自行決定每對配對的處理方式｜自動：逐輪移除最高 VIF 特徵直到收斂",
+    )
+    if mode == "🤖 迭代自動剔除":
+        _render_auto_vif(clean_df, num_cols)
+        return
+
+    # ── 以下為手動模式 ─────────────────────────────────────────────
     # ── 參數設定 ──────────────────────────────────────────────────
     c1, c2, c3 = st.columns(3)
     vif_warn  = c1.slider("VIF 警示門檻", 2.0, 20.0, 5.0,  0.5, key="fe_vif_warn",
