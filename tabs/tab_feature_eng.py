@@ -264,10 +264,9 @@ def _render_auto_vif(clean_df: pd.DataFrame, num_cols: list):
     btn_c1, btn_c2 = st.columns([2, 1])
     run_auto = btn_c1.button("🤖 執行迭代自動剔除", key="fe_auto_run", type="primary")
     if btn_c2.button("🔄 清除結果", key="fe_auto_clear"):
-        st.session_state["fe_auto_result"] = None
-        st.session_state["fe_auto_log"]    = None
+        st.session_state["fe_vif_result"] = None  # 修改這行
+        st.session_state["fe_vif_log"] = None     # 修改這行
         st.rerun()
-
     if run_auto:
         with st.spinner(f"正在迭代 VIF 剔除..."):
             df_result, elim_log = _iterative_vif_elimination(
@@ -279,16 +278,16 @@ def _render_auto_vif(clean_df: pd.DataFrame, num_cols: list):
             # 順便把最終 VIF 算好存起來，避免 rerun 時重複計算
             final_vif_df = _compute_vif(df_result) 
             
-        st.session_state["fe_auto_result"] = df_result
-        st.session_state["fe_auto_log"] = elim_log
+        st.session_state["fe_vif_result"] = df_result
+        st.session_state["fe_vif_log"] = elim_log
         st.session_state["fe_auto_vif_final"] = final_vif_df # 新增快取
         st.rerun()
 
     # 讀取時
     final_vif = st.session_state.get("fe_auto_vif_final")
 
-    auto_result = st.session_state.get("fe_auto_result")
-    auto_log    = st.session_state.get("fe_auto_log")
+    auto_result = st.session_state.get("fe_vif_result")
+    auto_log    = st.session_state.get("fe_vif_log")
 
     if auto_result is None or auto_log is None:
         st.info("設定參數後，點擊「🤖 執行迭代自動剔除」開始。")
@@ -344,8 +343,8 @@ def _render_auto_vif(clean_df: pd.DataFrame, num_cols: list):
         _push_op("vif_reduce", all_removed, [], snap)
         st.session_state["clean_df"]       = auto_result
         st.session_state["fe_vif_df"]      = None
-        st.session_state["fe_auto_result"] = None
-        st.session_state["fe_auto_log"]    = None
+        st.session_state["fe_vif_result"] = None
+        st.session_state["fe_vif_log"] = None
         st.success(f"✅ 已套用！共移除 {len(all_removed)} 個特徵。")
         st.rerun()
 
