@@ -269,13 +269,18 @@ def _render_auto_vif(clean_df: pd.DataFrame, num_cols: list):
         st.rerun()
 
     if run_auto:
-        with st.spinner(f"正在迭代 VIF 剔除（門檻={auto_thr}，最大 {auto_max_iter} 輪）..."):
-            df_result, elim_log = _iterative_vif_elimination(
-                clean_df, float(auto_thr), int(auto_max_iter), protected
-            )
+        with st.spinner(f"正在迭代 VIF 剔除..."):
+            df_result, elim_log = _iterative_vif_elimination(...)
+            # 順便把最終 VIF 算好存起來，避免 rerun 時重複計算
+            final_vif_df = _compute_vif(df_result) 
+            
         st.session_state["fe_auto_result"] = df_result
-        st.session_state["fe_auto_log"]    = elim_log
+        st.session_state["fe_auto_log"] = elim_log
+        st.session_state["fe_auto_vif_final"] = final_vif_df # 新增快取
         st.rerun()
+
+    # 讀取時
+    final_vif = st.session_state.get("fe_auto_vif_final")
 
     auto_result = st.session_state.get("fe_auto_result")
     auto_log    = st.session_state.get("fe_auto_log")
@@ -368,10 +373,14 @@ def _render_collinearity_merge(show_mean: bool = True):
         ["🔍 手動配對診斷", "🤖 迭代自動剔除"],
         horizontal=True,
         key="fe_vif_mode",
-        help="手動：查看 VIF 總覽並自行決定每對配對的處理方式｜自動：逐輪移除最高 VIF 特徵直到收斂",
     )
+
+    # 確保在進入特定模式前，基本的 clean_df 判斷已經完成
     if mode == "🤖 迭代自動剔除":
-        _render_auto_vif(clean_df, num_cols)
+        # 這裡建議加上一個 Spinner，讓使用者知道正在載入自動模式的 UI
+        with st.container():
+            _render_auto_vif(clean_df, num_cols)
+        # 務必在這裡 return，避免跑到底下的手動模式參數設定
         return
 
     # ── 以下為手動模式 ─────────────────────────────────────────────
