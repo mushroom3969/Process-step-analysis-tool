@@ -113,6 +113,83 @@ def _compute_vif(df: pd.DataFrame) -> pd.DataFrame:
     return vif_df.sort_values('VIF', ascending=False).reset_index(drop=True)
 
 
+def _iterative_vif_elimination(
+    df: pd.DataFrame,
+    vif_threshold: float = 5.0,
+    max_iter: int = 20,
+    protected_cols: list = None,
+) -> tuple:
+    """
+    迭代 VIF 剔除：每輪從可刪除特徵中移除 VIF 最高者，重新計算，
+    直到所有可刪除特徵 VIF ≤ threshold，或達到 max_iter 輪次。
+    回傳 (處理後 DataFrame, 剔除記錄 list[dict])
+    """
+    from sklearn.linear_model import LinearRegression
+    if protected_cols is None:
+        protected_cols = []
+    protected_set = set(protected_cols)
+    df_work = df.copy()
+    log = []
+
+    for iteration in range(1, max_iter + 1):
+        num_cols = [c for c in df_work.select_dtypes(include='number').columns
+                    if c.lower() != 'batchid']
+        eligible = [c for c in num_cols if c not in protected_set]
+
+        if len(num_cols) < 2 or not eligible:
+            break
+
+        X = df_work[num_cols].copy()
+        X = X.fillna(X.median())
+
+        # 計算保護欄外的每個可刪除特徵之 VIF（保護欄仍參與迴歸）
+        vif_eligible = {}
+        for col in eligible:
+            y = X[col].values
+            others = X.drop(columns=[col]).values
+            if others.shape[1] == 0:
+                continue
+            r2 = LinearRegression().fit(others, y).score(others, y)
+            vif_eligible[col] = 1.0 / (1.0 - r2) if r2 < 1.0 else np.inf
+
+        if not vif_eligible:
+            break
+
+        max_vif_val = max(vif_eligible.values())
+        max_vif_col = max(vif_eligible, key=vif_eligible.get)
+
+        if max_vif_val <= vif_threshold:
+            log.append({
+                '輪次': f'第 {iteration} 輪',
+                '動作': '✅ 收斂',
+                '移除特徵': '—',
+                '該輪最高 VIF': f'{max_vif_val:.2f}',
+                '剩餘特徵數': len(num_cols),
+            })
+            break
+
+        log.append({
+            '輪次': f'第 {iteration} 輪',
+            '動作': '刪除',
+            '移除特徵': max_vif_col.split(':')[-1][:60],
+            '該輪最高 VIF': f'{max_vif_val:.2f}',
+            '剩餘特徵數': len(num_cols) - 1,
+        })
+        df_work = df_work.drop(columns=[max_vif_col])
+    else:
+        num_remaining = len([c for c in df_work.select_dtypes(include='number').columns
+                             if c.lower() != 'batchid'])
+        log.append({
+            '輪次': f'第 {max_iter} 輪（達上限）',
+            '動作': '⚠️ 未收斂',
+            '移除特徵': '—',
+            '該輪最高 VIF': '—',
+            '剩餘特徵數': num_remaining,
+        })
+
+    return df_work, log
+
+
 def _high_vif_pairs(df: pd.DataFrame, cols: list[str],
                     method: str = 'pearson') -> pd.DataFrame:
     """
@@ -130,7 +207,10 @@ def _high_vif_pairs(df: pd.DataFrame, cols: list[str],
                 'Feature B': cols[j],
                 col_label: round(float(corr.iloc[i, j]), 3),
             })
-    return pd.DataFrame(rows).sort_values(col_label, ascending=False).reset_index(drop=True)
+    df_rows = pd.DataFrame(rows)
+    if df_rows.empty:
+        return pd.DataFrame(columns=['Feature A', 'Feature B', col_label])
+    return df_rows.sort_values(col_label, ascending=False).reset_index(drop=True)
 
 
 def _compute_mi_pairs(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
@@ -150,7 +230,114 @@ def _compute_mi_pairs(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
             )[0]
             rows.append({'Feature A': cols[i], 'Feature B': cols[j],
                          'MI': round(float(mi), 4)})
-    return pd.DataFrame(rows).sort_values('MI', ascending=False).reset_index(drop=True)
+    df_mi = pd.DataFrame(rows)
+    if df_mi.empty:
+        return pd.DataFrame(columns=['Feature A', 'Feature B', 'MI'])
+    return df_mi.sort_values('MI', ascending=False).reset_index(drop=True)
+
+
+def _render_auto_vif(clean_df: pd.DataFrame, num_cols: list):
+    """自動迭代 VIF 剔除 UI（在 _render_collinearity_merge 中以模式切換呼叫）"""
+    st.caption(
+        "每輪自動移除 VIF 最高的特徵（可刪除範圍內），重新計算，"
+        "直到所有特徵 VIF ≤ 門檻或達到最大輪次。\n\n"
+        "適合需要快速篩選大量特徵的情境；保護欄位不會被刪除，但仍參與 VIF 計算。"
+    )
+
+    a1, a2 = st.columns(2)
+    auto_thr = a1.slider(
+        "VIF 剔除門檻", 2.0, 20.0, 5.0, 0.5, key="fe_auto_thr",
+        help="高於此值的特徵（由高到低）逐輪被移除",
+    )
+    auto_max_iter = a2.number_input(
+        "最大迭代輪次", 1, 100, 20, step=1, key="fe_auto_max",
+        help="超過此輪次即使未收斂也停止",
+    )
+
+    protected = st.multiselect(
+        "保護欄位（不允許被自動刪除）",
+        options=num_cols,
+        key="fe_auto_protected",
+        help="選擇不希望被自動剔除的特徵；它們仍會參與其他欄位的 VIF 計算",
+    )
+
+    btn_c1, btn_c2 = st.columns([2, 1])
+    run_auto = btn_c1.button("🤖 執行迭代自動剔除", key="fe_auto_run", type="primary")
+    if btn_c2.button("🔄 清除結果", key="fe_auto_clear"):
+        st.session_state["fe_auto_result"] = None
+        st.session_state["fe_auto_log"]    = None
+        st.rerun()
+
+    if run_auto:
+        with st.spinner(f"正在迭代 VIF 剔除（門檻={auto_thr}，最大 {auto_max_iter} 輪）..."):
+            df_result, elim_log = _iterative_vif_elimination(
+                clean_df, float(auto_thr), int(auto_max_iter), protected
+            )
+        st.session_state["fe_auto_result"] = df_result
+        st.session_state["fe_auto_log"]    = elim_log
+        st.rerun()
+
+    auto_result = st.session_state.get("fe_auto_result")
+    auto_log    = st.session_state.get("fe_auto_log")
+
+    if auto_result is None or auto_log is None:
+        st.info("設定參數後，點擊「🤖 執行迭代自動剔除」開始。")
+        return
+
+    # ── 統計摘要 ──────────────────────────────────────────────
+    before_n   = len(num_cols)
+    after_cols = [c for c in auto_result.select_dtypes(include='number').columns
+                  if c.lower() != 'batchid']
+    after_n    = len(after_cols)
+    removed_n  = before_n - after_n
+
+    rm1, rm2, rm3 = st.columns(3)
+    rm1.metric("原始特徵數", before_n)
+    rm2.metric("移除特徵數", removed_n, delta=f"-{removed_n}", delta_color="inverse")
+    rm3.metric("保留特徵數", after_n)
+
+    # ── 逐輪剔除記錄 ──────────────────────────────────────────
+    st.markdown("#### 📋 逐輪剔除記錄")
+    st.dataframe(pd.DataFrame(auto_log), use_container_width=True, hide_index=True)
+
+    # ── 移除欄位清單 ──────────────────────────────────────────
+    removed_cols = [c for c in num_cols if c not in set(after_cols)]
+    if removed_cols:
+        with st.expander(f"🗑️ 已移除欄位清單（共 {len(removed_cols)} 欄）"):
+            st.dataframe(
+                pd.DataFrame({"移除特徵": removed_cols}),
+                use_container_width=True, hide_index=True,
+            )
+
+    # ── 剩餘特徵最終 VIF ──────────────────────────────────────
+    st.markdown("#### 📊 剩餘特徵最終 VIF")
+    with st.spinner("計算剩餘特徵 VIF..."):
+        final_vif = _compute_vif(auto_result)
+
+    def _auto_color(val):
+        if not isinstance(val, (int, float)) or np.isnan(val):
+            return ''
+        if val >= 10: return 'background-color:#FFCCCC'
+        if val >= 5:  return 'background-color:#FFF3CC'
+        return 'background-color:#CCFFCC'
+
+    st.dataframe(
+        final_vif.style.map(_auto_color, subset=['VIF']),
+        use_container_width=True, hide_index=True, height=250,
+    )
+
+    # ── 套用按鈕 ──────────────────────────────────────────────
+    st.markdown("---")
+    if st.button("✅ 套用結果至資料集", key="fe_auto_apply", type="primary"):
+        snap         = clean_df.copy()
+        all_removed  = [c for c in clean_df.columns if c not in auto_result.columns]
+        _push_op("vif_reduce", all_removed, [], snap)
+        st.session_state["clean_df"]       = auto_result
+        st.session_state["fe_vif_df"]      = None
+        st.session_state["fe_auto_result"] = None
+        st.session_state["fe_auto_log"]    = None
+        st.success(f"✅ 已套用！共移除 {len(all_removed)} 個特徵。")
+        st.rerun()
 
 
 def _render_collinearity_merge(show_mean: bool = True):
@@ -175,6 +362,19 @@ def _render_collinearity_merge(show_mean: bool = True):
         st.info("數值特徵不足 2 欄，無法計算 VIF。")
         return
 
+    # ── 模式切換 ──────────────────────────────────────────────────
+    mode = st.radio(
+        "診斷模式",
+        ["🔍 手動配對診斷", "🤖 迭代自動剔除"],
+        horizontal=True,
+        key="fe_vif_mode",
+        help="手動：查看 VIF 總覽並自行決定每對配對的處理方式｜自動：逐輪移除最高 VIF 特徵直到收斂",
+    )
+    if mode == "🤖 迭代自動剔除":
+        _render_auto_vif(clean_df, num_cols)
+        return
+
+    # ── 以下為手動模式 ─────────────────────────────────────────────
     # ── 參數設定 ──────────────────────────────────────────────────
     c1, c2, c3 = st.columns(3)
     vif_warn  = c1.slider("VIF 警示門檻", 2.0, 20.0, 5.0,  0.5, key="fe_vif_warn",
@@ -188,17 +388,17 @@ def _render_collinearity_merge(show_mean: bool = True):
         help="Pearson: 線性｜Spearman: 單調非線性｜MI: 任意非線性（含非單調）"
     )
 
-    if "MI" in corr_method_sel:
+    if "Mutual" in corr_method_sel:
         corr_method, corr_label, corr_col = 'mi', 'MI (nats)', 'MI'
-        r_thr = st.slider("MI 門檻 (nats)", 0.0, 2.0, 0.1, 0.01, key="fe_r_thr",
+        r_thr = st.slider("MI 門檻 (nats)", 0.0, 2.0, 0.1, 0.01, key="fe_r_thr_mi",
                           help="MI ≥ 此值 → 顯示為高依賴性配對；完全獨立時 MI ≈ 0")
     elif "Spearman" in corr_method_sel:
         corr_method, corr_label, corr_col = 'spearman', '|ρ| (Spearman)', '|ρ|'
-        r_thr = st.slider("配對 |ρ| 門檻", 0.5, 1.0, 0.85, 0.01, key="fe_r_thr",
+        r_thr = st.slider("配對 |ρ| 門檻", 0.5, 1.0, 0.85, 0.01, key="fe_r_thr_sp",
                           help="|ρ| ≥ 此值 → 顯示為高度相關配對")
     else:
         corr_method, corr_label, corr_col = 'pearson', '|r| (Pearson)', '|r|'
-        r_thr = st.slider("配對 |r| 門檻", 0.5, 1.0, 0.85, 0.01, key="fe_r_thr",
+        r_thr = st.slider("配對 |r| 門檻", 0.5, 1.0, 0.85, 0.01, key="fe_r_thr_pe",
                           help="|r| ≥ 此值 → 顯示為高度相關配對")
 
     # ── 執行 / 清除按鈕 ───────────────────────────────────────────
@@ -217,6 +417,13 @@ def _render_collinearity_merge(show_mean: bool = True):
 
     # ── 讀取已儲存的 VIF 結果 ─────────────────────────────────────
     vif_df = st.session_state.get("fe_vif_df")
+    if vif_df is not None:
+        # 若 clean_df 的欄位已改變（執行處理後），自動失效快取
+        current_cols = set(clean_df.columns)
+        cached_cols  = set(vif_df['Feature'].tolist())
+        if not cached_cols.issubset(current_cols):
+            st.session_state["fe_vif_df"] = None
+            vif_df = None
     if vif_df is None:
         st.info("點擊「🔍 執行共線性診斷」開始。")
         return
@@ -264,51 +471,69 @@ def _render_collinearity_merge(show_mean: bool = True):
     plt.tight_layout(); st.pyplot(fig); plt.close(fig)
 
     # ── 高 VIF 特徵的 Pairwise 分析 ──────────────────────────────────
-    high_vif_cols = vif_df.loc[vif_df['VIF'] >= vif_warn, 'Feature'].tolist()
+    high_vif_cols = [c for c in vif_df.loc[vif_df['VIF'] >= vif_warn, 'Feature'].tolist()
+                     if c in clean_df.columns]
 
     if not high_vif_cols:
         st.success("✅ 所有特徵 VIF 均低於警示門檻，無需處理。")
         return
 
-    # 配對結果快取（避免每次 rerun 重算，特別是 MI 很慢）
+    # ── 配對計算按鈕（獨立觸發，避免 spinner 打斷 render）──────
+    cache_key = f"{corr_method}_{','.join(sorted(high_vif_cols))}"
     pair_cache = st.session_state.get("fe_pair_cache")
-    cache_key  = f"{corr_method}_{r_thr}_{','.join(sorted(high_vif_cols))}"
-    if pair_cache is None or pair_cache.get("key") != cache_key:
+    pair_df    = pair_cache["df"] if (pair_cache and pair_cache.get("key") == cache_key) else None
+
+    n_pairs_possible = len(high_vif_cols) * (len(high_vif_cols) - 1) // 2
+    btn_label = (
+        f"📊 計算配對相關（{corr_label}，共 {n_pairs_possible} 對）"
+        if pair_df is None
+        else f"🔄 重新計算配對相關（{corr_label}）"
+    )
+    if st.button(btn_label, key="run_pair", type="secondary"):
         if corr_method == 'mi':
             if len(high_vif_cols) > 30:
                 st.warning(f"⚠️ 高 VIF 特徵共 {len(high_vif_cols)} 個，MI 計算可能較慢。")
-            with st.spinner(f"計算 Mutual Information（{len(high_vif_cols)} 個特徵）..."):
+            try:
                 pair_df = _compute_mi_pairs(clean_df, high_vif_cols)
+            except Exception as e:
+                st.error(f"MI 計算失敗：{e}")
+                return
         else:
-            pair_df = _high_vif_pairs(clean_df, high_vif_cols, method=corr_method)
+            try:
+                pair_df = _high_vif_pairs(clean_df, high_vif_cols, method=corr_method)
+            except Exception as e:
+                st.error(f"配對相關計算失敗：{e}")
+                return
         st.session_state["fe_pair_cache"] = {"key": cache_key, "df": pair_df}
-    else:
-        pair_df = pair_cache["df"]
+        # 不呼叫 st.rerun()，直接往下 render 結果
 
-    high_pairs = pair_df[pair_df[corr_col] >= r_thr].reset_index(drop=True)
-
-    st.markdown(f"#### 🔍 高 VIF 特徵配對分析（{corr_label} ≥ {r_thr}）")
-    if high_pairs.empty:
-        st.info(f"高 VIF 特徵間 pairwise {corr_label} 均低於 {r_thr}，"
-                "可能是多個特徵共同造成的多重共線性（非單一配對）。")
+    if pair_df is None:
+        st.info("點擊上方按鈕計算配對相關。")
         return
 
-    st.dataframe(high_pairs, use_container_width=True, hide_index=True)
+    st.markdown("#### 🔍 高 VIF 特徵配對分析")
 
-    # 視覺化
+    if pair_df.empty:
+        st.info("高 VIF 特徵數不足（需 ≥ 2 個），無法計算配對相關。")
+        return
+
+    # MI：Top-20 長條圖（全部 score 顯示，門檻線標示）
     if corr_method == 'mi':
-        top_pairs = high_pairs.head(20)
+        top_all = pair_df.head(20)
         pair_labels = [
             f"{r['Feature A'].split(':')[-1][:20]}↔{r['Feature B'].split(':')[-1][:20]}"
-            for _, r in top_pairs.iterrows()
+            for _, r in top_all.iterrows()
         ]
-        fig2, ax2 = plt.subplots(figsize=(10, max(4, len(top_pairs) * 0.4)))
-        ax2.barh(pair_labels, top_pairs['MI'], color='#9B59B6', alpha=0.8)
-        ax2.axvline(r_thr, color='red', lw=1.2, ls='--', label=f'門檻={r_thr}')
+        fig2, ax2 = plt.subplots(figsize=(10, max(4, len(top_all) * 0.4)))
+        colors = ['#9B59B6' if v >= r_thr else '#CCCCCC' for v in top_all['MI']]
+        ax2.barh(pair_labels, top_all['MI'], color=colors, alpha=0.85)
+        ax2.axvline(r_thr, color='red', lw=1.5, ls='--', label=f'門檻={r_thr}')
         ax2.set_xlabel('Mutual Information (nats)')
-        ax2.set_title('Top 20 High-MI Pairs', fontsize=10)
+        ax2.set_title('Top 20 MI Pairs（紫色 ≥ 門檻）', fontsize=10)
         ax2.invert_yaxis(); ax2.legend(fontsize=8); ax2.grid(axis='x', alpha=0.3)
         plt.tight_layout(); st.pyplot(fig2); plt.close(fig2)
+        st.caption(f"共 {len(pair_df)} 個配對，最大 MI = {pair_df['MI'].max():.4f}，目前門檻 = {r_thr}")
+
     elif len(high_vif_cols) <= 25:
         sub = clean_df[high_vif_cols].fillna(clean_df[high_vif_cols].median())
         corr_mat = sub.corr(method=corr_method).abs()
@@ -324,51 +549,60 @@ def _render_collinearity_merge(show_mean: bool = True):
         plt.yticks(fontsize=7)
         plt.tight_layout(); st.pyplot(fig2); plt.close(fig2)
 
-    # ── 處理選項（radio 不再觸發重算）────────────────────────────
+    # ── 處理選項（data_editor）──────────────────────────────────
+    high_pairs = pair_df[pair_df[corr_col] >= r_thr].reset_index(drop=True)
     st.markdown("#### ⚡ 處理高度相關配對")
-    st.caption("選完所有配對的處理方式後，統一點擊「⚡ 執行處理」。")
 
-    action_map = {}
-    for idx, row in high_pairs.iterrows():
-        fa, fb = row['Feature A'], row['Feature B']
-        r_val = row[corr_col]
-        with st.expander(
-            f"{corr_col} = {r_val:.3f}  |  `{fa.split(':')[-1][:45]}` ↔ `{fb.split(':')[-1][:45]}`",
-            expanded=(idx < 3)
-        ):
-            act = st.radio(
-                "處理方式",
-                ["保留兩欄", "合併為 mean → 新欄", "刪除 A", "刪除 B"],
-                key=f"fe_act_{idx}", horizontal=True
-            )
-            new_name = ""
-            if "合併" in act:
-                new_name = st.text_input(
-                    "新欄位名稱",
-                    value=f"{fa.split(':')[-1][:30]}_mean",
-                    key=f"fe_mname_{idx}"
-                )
-            action_map[idx] = {'fa': fa, 'fb': fb, 'act': act, 'new_name': new_name}
+    if high_pairs.empty:
+        st.info(f"目前門檻 {r_thr} 下無配對超過門檻，請降低門檻或查看上方長條圖確認分佈。")
+        return
+
+    st.caption(f"共 {len(high_pairs)} 個配對 ≥ {r_thr}。在表格選擇動作，全部選完後點「⚡ 執行處理」。")
+    edit_df = high_pairs[[c for c in ['Feature A', 'Feature B', corr_col] if c in high_pairs.columns]].copy()
+    edit_df['處理方式'] = '保留兩欄'
+    edit_df['新欄位名稱'] = [
+        f"{str(fa).split(':')[-1][:25]}_mean" for fa in edit_df['Feature A']
+    ]
+
+    edited_df = st.data_editor(
+        edit_df,
+        column_config={
+            'Feature A':  st.column_config.TextColumn('Feature A',  disabled=True),
+            'Feature B':  st.column_config.TextColumn('Feature B',  disabled=True),
+            corr_col:     st.column_config.NumberColumn(corr_col,   disabled=True, format='%.3f'),
+            '處理方式':   st.column_config.SelectboxColumn(
+                              '處理方式',
+                              options=['保留兩欄', '合併為 mean', '刪除 A', '刪除 B'],
+                              required=True,
+                          ),
+            '新欄位名稱': st.column_config.TextColumn('新欄位名稱（合併時填寫）'),
+        },
+        use_container_width=True,
+        hide_index=True,
+        num_rows='fixed',
+        key=f"fe_pair_editor_{cache_key[:12]}",
+    )
 
     if st.button("⚡ 執行處理", key="fe_vif_exec", type="primary"):
         df_work = clean_df.copy()
         ops_log = []
 
-        for idx, info in action_map.items():
-            fa, fb = info['fa'], info['fb']
-            act = info['act']
+        for _, row in edited_df.iterrows():
+            fa  = row['Feature A']
+            fb  = row['Feature B']
+            act = row['處理方式']
             if '保留' in act:
                 continue
             if '合併' in act:
-                nn = info['new_name'].strip() or f"{fa[:20]}_mean"
-                if fa in df_work and fb in df_work:
+                nn = str(row.get('新欄位名稱', '')).strip() or f"{str(fa)[:20]}_mean"
+                if fa in df_work.columns and fb in df_work.columns:
                     df_work[nn] = df_work[[fa, fb]].mean(axis=1)
                     df_work.drop(columns=[fa, fb], inplace=True, errors='ignore')
                     ops_log.append(('merge', [fa, fb], [nn]))
-            elif '刪除 A' in act and fa in df_work:
+            elif '刪除 A' in act and fa in df_work.columns:
                 df_work.drop(columns=[fa], inplace=True, errors='ignore')
                 ops_log.append(('drop', [fa], []))
-            elif '刪除 B' in act and fb in df_work:
+            elif '刪除 B' in act and fb in df_work.columns:
                 df_work.drop(columns=[fb], inplace=True, errors='ignore')
                 ops_log.append(('drop', [fb], []))
 
