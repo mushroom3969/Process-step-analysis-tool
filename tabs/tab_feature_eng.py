@@ -270,7 +270,12 @@ def _render_auto_vif(clean_df: pd.DataFrame, num_cols: list):
 
     if run_auto:
         with st.spinner(f"正在迭代 VIF 剔除..."):
-            df_result, elim_log = _iterative_vif_elimination(...)
+            df_result, elim_log = _iterative_vif_elimination(
+                clean_df,           # 傳入目前的 DataFrame
+                float(auto_thr),    # 傳入 VIF 門檻
+                int(auto_max_iter), # 傳入最大迭代次數
+                protected           # 傳入保護欄位清單
+                )
             # 順便把最終 VIF 算好存起來，避免 rerun 時重複計算
             final_vif_df = _compute_vif(df_result) 
             
