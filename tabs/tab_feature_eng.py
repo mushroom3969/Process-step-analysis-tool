@@ -903,7 +903,7 @@ def _render_main(selected_process_df, show_mean: bool = True):
 
     # 持久化顯示 Step 1 結果
     auto_res = st.session_state.get("fe_auto_result")
-    if auto_res:
+    if auto_res is not None:
         st.success(f"✅ Step 1 完成：從 {auto_res['n_before']} 欄 → {auto_res['n_after']} 欄")
         with st.expander("查看 Step 1 變更詳情", expanded=False):
             _render_changed_cols(
@@ -971,7 +971,7 @@ def _render_main(selected_process_df, show_mean: bool = True):
                     st.dataframe(reasons, use_container_width=True, hide_index=True)
 
             _render_changed_cols(
-                df_before=stat_res["snapshot"], df_after=stat_res["filtered_df"],
+                df_before=stat_res["snapshot"], =stat_res["filtered_df"],
                 cols_removed=stat_res["removed"], cols_added=[],
                 source_df_for_removed=stat_res["snapshot"],
                 section_title="Step 2 變更詳情", show_mean=show_mean
